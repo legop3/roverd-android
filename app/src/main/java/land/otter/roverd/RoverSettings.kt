@@ -11,6 +11,7 @@ data class RoverConfig(
     val brcActiveLow: Boolean,
     val brcPulseEveryMs: Long,
     val brcPulseWidthMs: Long,
+    val cameraId: String,
 )
 
 enum class BrcLine { RTS, DTR }
@@ -29,6 +30,7 @@ object RoverSettings {
             brcActiveLow = p.getBoolean("brcActiveLow", true),
             brcPulseEveryMs = p.getLong("brcPulseEveryMs", 60_000L),
             brcPulseWidthMs = p.getLong("brcPulseWidthMs", 1_000L),
+            cameraId = p.getString("cameraId", "0") ?: "0",
         )
     }
 
@@ -42,6 +44,7 @@ object RoverSettings {
             .putBoolean("brcActiveLow", config.brcActiveLow)
             .putLong("brcPulseEveryMs", config.brcPulseEveryMs)
             .putLong("brcPulseWidthMs", config.brcPulseWidthMs)
+            .putString("cameraId", config.cameraId)
             .apply()
     }
 }
