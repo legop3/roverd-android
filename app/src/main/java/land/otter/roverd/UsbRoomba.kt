@@ -37,6 +37,7 @@ class UsbRoomba(
     private val writeLock = Any()
     private val framer = SensorFramer { frame ->
         lastSensorFrameNs = System.nanoTime()
+        RoverRuntimeState.recordSensor(frame)
         onSensorFrame(frame)
     }
 
@@ -86,12 +87,18 @@ class UsbRoomba(
 
     fun connect() {
         if (port != null) return
-        val driver = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager).firstOrNull()
+        val drivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
+        RoverRuntimeState.log("USB probe found ${drivers.size} supported serial driver(s)")
+        val driver = drivers.firstOrNull()
         if (driver == null) {
             onStatus("No supported USB serial adapter found")
             return
         }
         val device = driver.device
+        RoverRuntimeState.log(
+            "USB candidate name=${device.deviceName} vid=0x${device.vendorId.toString(16)} " +
+                "pid=0x${device.productId.toString(16)} driver=${driver.javaClass.simpleName} ports=${driver.ports.size}",
+        )
         if (!usbManager.hasPermission(device)) {
             val permissionIntent = PendingIntent.getBroadcast(
                 context,
@@ -135,6 +142,16 @@ class UsbRoomba(
             ioManager = SerialInputOutputManager(openedPort, this).also { it.start() }
             startBrcPulser()
             startSensorWatchdog()
+
+            val description = buildString {
+                append(device.deviceName)
+                append(" vid=0x${device.vendorId.toString(16)}")
+                append(" pid=0x${device.productId.toString(16)}")
+                append(" driver=${driver.javaClass.simpleName}")
+                append(" baud=${config.baud}")
+                append(" BRC=${config.brcLine}/${if (config.brcActiveLow) "active-low" else "active-high"}")
+            }
+            RoverRuntimeState.setUsbState(true, description)
             onConnectionChanged(true)
             onStatus("USB serial connected: ${device.deviceName} @ ${config.baud}")
 
@@ -147,6 +164,7 @@ class UsbRoomba(
             runCatching { connection.close() }
             closePort()
             onStatus("USB serial open failed: ${t.message}")
+            RoverRuntimeState.log("USB open exception: ${t.stackTraceToString()}")
         }
     }
 
@@ -171,12 +189,33 @@ class UsbRoomba(
     fun seekDock() = write(byteArrayOf(RoombaOi.SEEK_DOCK.toByte()))
     fun startSensorStream(packetIds: ByteArray = RoombaOi.DEFAULT_STREAM_PACKETS) = write(RoombaOi.startSensorStream(packetIds))
 
+    fun reconnect() {
+        RoverRuntimeState.log("MANUAL USB reconnect")
+        closePort()
+        connect()
+    }
+
+    fun restartSensorStreamNow() {
+        scheduler.execute { recoverSensorStream("manual") }
+    }
+
+    fun pulseBrcNow() {
+        scheduler.execute {
+            try {
+                pulseBrc("manual")
+                onStatus("Manual BRC pulse complete")
+            } catch (t: Throwable) {
+                onStatus("Manual BRC pulse failed: ${t.message}")
+            }
+        }
+    }
+
     private fun startBrcPulser() {
         brcTask?.cancel(false)
         brcTask = scheduler.scheduleAtFixedRate(
             {
                 try {
-                    pulseBrc()
+                    pulseBrc("periodic")
                 } catch (t: Throwable) {
                     if (port != null) onStatus("BRC pulse failed: ${t.message}")
                 }
@@ -187,8 +226,11 @@ class UsbRoomba(
         )
     }
 
-    private fun pulseBrc() {
+    private fun pulseBrc(reason: String) {
         if (port == null) return
+        RoverRuntimeState.log(
+            "BRC pulse reason=$reason line=${config.brcLine} activeLow=${config.brcActiveLow} widthMs=${config.brcPulseWidthMs}",
+        )
         setBrcAsserted(true)
         try {
             Thread.sleep(config.brcPulseWidthMs)
@@ -220,12 +262,14 @@ class UsbRoomba(
     private fun recoverSensorStream(reason: String) {
         if (port == null) return
         try {
+            RoverRuntimeState.log("SENSOR recovery start reason=$reason")
             startOi()
             Thread.sleep(SENSOR_COMMAND_PAUSE_MS)
             startSensorStream()
             onStatus("Sensor stream restarted ($reason)")
         } catch (t: Throwable) {
             if (port != null) onStatus("Sensor stream recovery failed: ${t.message}")
+            RoverRuntimeState.log("SENSOR recovery exception: ${t.stackTraceToString()}")
         }
     }
 
@@ -247,6 +291,7 @@ class UsbRoomba(
 
     override fun onRunError(e: Exception) {
         onStatus("USB serial read error: ${e.message}")
+        RoverRuntimeState.log("USB read exception: ${e.stackTraceToString()}")
         closePort()
         runCatching {
             scheduler.schedule({ connect() }, 2, TimeUnit.SECONDS)
@@ -268,7 +313,10 @@ class UsbRoomba(
         port = null
         if (p != null) runCatching { p.close() }
 
-        if (wasConnected) onConnectionChanged(false)
+        if (wasConnected) {
+            RoverRuntimeState.setUsbState(false)
+            onConnectionChanged(false)
+        }
     }
 
     override fun close() {
