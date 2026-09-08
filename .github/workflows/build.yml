@@ -31,6 +31,11 @@ jobs:
       - name: Install Android platform
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
+      - name: Restore permanent APK signing key
+        run: |
+          base64 --decode signing/roverd-update.p12.b64 > signing/roverd-update.p12
+          echo "a9c266a7f03a029bbd221c1a1994b25da9bfbbab05f44ac90cd0d8f8e5836c41  signing/roverd-update.p12" | sha256sum -c -
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
