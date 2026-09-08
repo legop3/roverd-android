@@ -11,6 +11,11 @@ class RoverService : Service() {
     companion object {
         private const val CHANNEL_ID = "roverd"
         private const val NOTIFICATION_ID = 1
+
+        const val ACTION_RESTART = "restart"
+        const val ACTION_RECONNECT_USB = "reconnect_usb"
+        const val ACTION_RESTART_SENSOR_STREAM = "restart_sensor_stream"
+        const val ACTION_PULSE_BRC = "pulse_brc"
     }
 
     private var roomba: UsbRoomba? = null
@@ -18,6 +23,8 @@ class RoverService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        RoverRuntimeState.initialize(this)
+        installCrashLogger()
         startForeground(NOTIFICATION_ID, buildNotification("Starting rover"))
         startRuntime()
     }
@@ -26,6 +33,11 @@ class RoverService : Service() {
         stopRuntime()
         val config = RoverSettings.load(this)
         RoverRuntimeState.update("Starting ${config.name}")
+        RoverRuntimeState.log(
+            "CONFIG name=${config.name} server=${config.serverUrl} baud=${config.baud} maxWheelSpeed=${config.maxWheelSpeed} " +
+                "brcLine=${config.brcLine} brcActiveLow=${config.brcActiveLow} brcEveryMs=${config.brcPulseEveryMs} " +
+                "brcWidthMs=${config.brcPulseWidthMs}",
+        )
 
         lateinit var usb: UsbRoomba
         usb = UsbRoomba(
@@ -86,7 +98,24 @@ class RoverService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == "restart") startRuntime()
+        when (intent?.action) {
+            ACTION_RESTART -> {
+                RoverRuntimeState.log("MANUAL full rover runtime restart")
+                startRuntime()
+            }
+            ACTION_RECONNECT_USB -> {
+                status("Manual USB reconnect requested")
+                roomba?.reconnect()
+            }
+            ACTION_RESTART_SENSOR_STREAM -> {
+                status("Manual sensor stream restart requested")
+                roomba?.restartSensorStreamNow()
+            }
+            ACTION_PULSE_BRC -> {
+                status("Manual BRC pulse requested")
+                roomba?.pulseBrcNow()
+            }
+        }
         return START_STICKY
     }
 
@@ -97,4 +126,19 @@ class RoverService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun installCrashLogger() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        if (previous is RoverCrashHandler) return
+        Thread.setDefaultUncaughtExceptionHandler(RoverCrashHandler(previous))
+    }
+
+    private class RoverCrashHandler(
+        private val previous: Thread.UncaughtExceptionHandler?,
+    ) : Thread.UncaughtExceptionHandler {
+        override fun uncaughtException(thread: Thread, throwable: Throwable) {
+            RoverRuntimeState.log("FATAL thread=${thread.name}: ${throwable.stackTraceToString()}")
+            previous?.uncaughtException(thread, throwable)
+        }
+    }
 }
