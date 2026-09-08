@@ -16,7 +16,7 @@ import kotlin.math.min
 
 class RoverServerClient(
     private val config: RoverConfig,
-    private val roomba: UsbRoomba,
+    private val roombaProvider: () -> UsbRoomba?,
     private val onStatus: (String) -> Unit,
 ) : Closeable {
 
@@ -91,7 +91,8 @@ class RoverServerClient(
             .put("private", JSONObject().put("enabled", false))
             .put("platform", JSONObject()
                 .put("type", "android")
-                .put("appVersion", "0.1.0"))
+                .put("appVersion", "0.1.0")
+                .put("usbSerialConnected", roombaProvider()?.isConnected() == true))
 
         RoverRuntimeState.log("WS hello=${hello.toString().take(2000)}")
         ws.send(hello.toString())
@@ -116,23 +117,32 @@ class RoverServerClient(
         }
     }
 
+    private fun connectedRoomba(): UsbRoomba {
+        val roomba = roombaProvider()
+        if (roomba == null || !roomba.isConnected()) {
+            throw IllegalStateException("USB serial not connected")
+        }
+        return roomba
+    }
+
     private fun dispatch(msg: JSONObject) {
         when {
             msg.has("driveDirect") -> {
                 val p = msg.getJSONObject("driveDirect")
-                roomba.driveDirect(p.optInt("left"), p.optInt("right"))
+                connectedRoomba().driveDirect(p.optInt("left"), p.optInt("right"))
             }
             msg.has("motorPwm") -> {
                 val p = msg.getJSONObject("motorPwm")
-                roomba.motorPwm(p.optInt("main"), p.optInt("side"), p.optInt("vacuum"))
+                connectedRoomba().motorPwm(p.optInt("main"), p.optInt("side"), p.optInt("vacuum"))
             }
             msg.has("sensorStream") -> {
                 if (msg.getJSONObject("sensorStream").optBoolean("enable")) {
-                    roomba.startSensorStream(DEFAULT_STREAM_PACKETS)
+                    connectedRoomba().startSensorStream(DEFAULT_STREAM_PACKETS)
                 }
             }
             msg.has("raw") && msg.optString("raw").isNotEmpty() -> {
                 val raw = Base64.decode(msg.getString("raw"), Base64.DEFAULT)
+                val roomba = connectedRoomba()
                 roomba.write(raw)
                 if (raw.isNotEmpty() && isModeOpcode(raw[0].toInt() and 0xff)) {
                     roomba.startSensorStream(DEFAULT_STREAM_PACKETS)
@@ -169,8 +179,10 @@ class RoverServerClient(
             RoverRuntimeState.setServerState(true)
             onStatus("Server connected")
             sendHello(webSocket)
-            runCatching { roomba.startSensorStream(DEFAULT_STREAM_PACKETS) }
-                .onFailure { onStatus("Sensor stream start failed: ${it.message}") }
+            roombaProvider()?.takeIf { it.isConnected() }?.let { roomba ->
+                runCatching { roomba.startSensorStream(DEFAULT_STREAM_PACKETS) }
+                    .onFailure { onStatus("Sensor stream start failed: ${it.message}") }
+            }
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
