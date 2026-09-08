@@ -41,29 +41,21 @@ class RoverService : Service() {
                 "brcWidthMs=${config.brcPulseWidthMs}",
         )
 
-        lateinit var usb: UsbRoomba
-        usb = UsbRoomba(
+        server = RoverServerClient(
+            config = config,
+            roombaProvider = { roomba },
+            onStatus = ::status,
+        ).also { it.start() }
+
+        roomba = UsbRoomba(
             context = this,
             config = config,
             onSensorFrame = { frame -> server?.sendSensorFrame(frame) },
             onStatus = ::status,
             onConnectionChanged = { connected ->
-                if (connected) startServer(config, usb)
-                else stopServer()
+                RoverRuntimeState.log("USB optional subsystem connected=$connected")
             },
-        )
-        roomba = usb
-        usb.connect()
-    }
-
-    @Synchronized
-    private fun startServer(config: RoverConfig, usb: UsbRoomba) {
-        if (server != null) return
-        server = RoverServerClient(
-            config = config,
-            roomba = usb,
-            onStatus = ::status,
-        ).also { it.start() }
+        ).also { it.connect() }
     }
 
     @Synchronized
