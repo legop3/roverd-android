@@ -19,6 +19,10 @@ object RoverRuntimeState {
         private set
     @Volatile var serverConnected: Boolean = false
         private set
+    @Volatile var wakeLockHeld: Boolean = false
+        private set
+    @Volatile var wifiLockHeld: Boolean = false
+        private set
     @Volatile var sensorFrames: Long = 0
         private set
     @Volatile var sensorBytes: Long = 0
@@ -83,6 +87,12 @@ object RoverRuntimeState {
     fun setServerState(connected: Boolean) {
         serverConnected = connected
         log("SERVER connected=$connected")
+    }
+
+    fun setPowerLocks(wakeHeld: Boolean, wifiHeld: Boolean) {
+        wakeLockHeld = wakeHeld
+        wifiLockHeld = wifiHeld
+        log("POWER locks wake=$wakeHeld wifi=$wifiHeld")
     }
 
     fun recordSensor(frame: ByteArray) {
