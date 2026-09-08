@@ -27,28 +27,39 @@ class RoverService : Service() {
         val config = RoverSettings.load(this)
         RoverRuntimeState.update("Starting ${config.name}")
 
-        val usb = UsbRoomba(
+        lateinit var usb: UsbRoomba
+        usb = UsbRoomba(
             context = this,
             config = config,
             onSensorFrame = { frame -> server?.sendSensorFrame(frame) },
             onStatus = ::status,
+            onConnectionChanged = { connected ->
+                if (connected) startServer(config, usb)
+                else stopServer()
+            },
         )
         roomba = usb
+        usb.connect()
+    }
 
-        val ws = RoverServerClient(
+    @Synchronized
+    private fun startServer(config: RoverConfig, usb: UsbRoomba) {
+        if (server != null) return
+        server = RoverServerClient(
             config = config,
             roomba = usb,
             onStatus = ::status,
-        )
-        server = ws
+        ).also { it.start() }
+    }
 
-        usb.connect()
-        ws.start()
+    @Synchronized
+    private fun stopServer() {
+        server?.close()
+        server = null
     }
 
     private fun stopRuntime() {
-        server?.close()
-        server = null
+        stopServer()
         roomba?.close()
         roomba = null
     }
@@ -67,7 +78,7 @@ class RoverService : Service() {
             )
         }
         return Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_data_usb)
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle("Roverd Android")
             .setContentText(text)
             .setOngoing(true)
