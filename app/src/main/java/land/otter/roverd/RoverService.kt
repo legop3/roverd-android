@@ -6,8 +6,10 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 
 class RoverService : Service() {
     companion object {
@@ -22,12 +24,15 @@ class RoverService : Service() {
 
     private var roomba: UsbRoomba? = null
     private var server: RoverServerClient? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onCreate() {
         super.onCreate()
         RoverRuntimeState.initialize(this)
         installCrashLogger()
         startForeground(NOTIFICATION_ID, buildNotification("Starting rover"))
+        acquireRuntimeLocks()
         startRuntime()
     }
 
@@ -56,6 +61,68 @@ class RoverService : Service() {
                 RoverRuntimeState.log("USB optional subsystem connected=$connected")
             },
         ).also { it.connect() }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun acquireRuntimeLocks() {
+        if (wakeLock?.isHeld != true) {
+            runCatching {
+                val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+                wakeLock = power.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "land.otter.roverd:RoverRuntime",
+                ).apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }.onFailure {
+                RoverRuntimeState.log("POWER wake lock acquire failed: ${it.stackTraceToString()}")
+            }
+        }
+
+        if (wifiLock?.isHeld != true) {
+            runCatching {
+                val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                wifiLock = wifi.createWifiLock(
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                    "land.otter.roverd:RoverWifi",
+                ).apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            }.onFailure {
+                RoverRuntimeState.log("POWER Wi-Fi lock acquire failed: ${it.stackTraceToString()}")
+            }
+        }
+
+        RoverRuntimeState.setPowerLocks(
+            wakeHeld = wakeLock?.isHeld == true,
+            wifiHeld = wifiLock?.isHeld == true,
+        )
+
+        if (Build.VERSION.SDK_INT >= 23) {
+            val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+            RoverRuntimeState.log(
+                "POWER batteryOptimizationExempt=${power.isIgnoringBatteryOptimizations(packageName)}",
+            )
+        }
+    }
+
+    private fun releaseRuntimeLocks() {
+        runCatching {
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        }.onFailure {
+            RoverRuntimeState.log("POWER Wi-Fi lock release failed: ${it.stackTraceToString()}")
+        }
+        wifiLock = null
+
+        runCatching {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        }.onFailure {
+            RoverRuntimeState.log("POWER wake lock release failed: ${it.stackTraceToString()}")
+        }
+        wakeLock = null
+        RoverRuntimeState.setPowerLocks(false, false)
     }
 
     @Synchronized
@@ -99,6 +166,7 @@ class RoverService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        acquireRuntimeLocks()
         when (intent?.action) {
             ACTION_RESTART -> {
                 RoverRuntimeState.log("MANUAL full rover runtime restart")
@@ -122,6 +190,7 @@ class RoverService : Service() {
 
     override fun onDestroy() {
         stopRuntime()
+        releaseRuntimeLocks()
         RoverRuntimeState.update("Stopped")
         super.onDestroy()
     }
