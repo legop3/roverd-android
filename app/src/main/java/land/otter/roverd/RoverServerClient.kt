@@ -43,6 +43,7 @@ class RoverServerClient(
     private fun connect() {
         if (closed.get() || connected || socket != null) return
         onStatus("Connecting to ${config.serverUrl}")
+        RoverRuntimeState.log("WS connect url=${config.serverUrl}")
         val request = Request.Builder().url(config.serverUrl).build()
         socket = http.newWebSocket(request, Listener())
     }
@@ -92,12 +93,15 @@ class RoverServerClient(
                 .put("type", "android")
                 .put("appVersion", "0.1.0"))
 
+        RoverRuntimeState.log("WS hello=${hello.toString().take(2000)}")
         ws.send(hello.toString())
     }
 
     private fun handleCommand(ws: WebSocket, text: String) {
+        RoverRuntimeState.recordCommand(text)
         val msg = runCatching { JSONObject(text) }.getOrElse {
             onStatus("Invalid server JSON: ${it.message}")
+            RoverRuntimeState.log("WS invalid JSON=${text.take(1500)}")
             return
         }
         val id = msg.optString("id")
@@ -107,6 +111,7 @@ class RoverServerClient(
             dispatch(msg)
             sendAck(ws, id, null)
         } catch (t: Throwable) {
+            RoverRuntimeState.log("CMD failure id=$id error=${t.message} raw=${text.take(1500)}")
             sendAck(ws, id, t.message ?: t.javaClass.simpleName)
         }
     }
@@ -152,6 +157,7 @@ class RoverServerClient(
         if (closed.get()) return
         val delay = reconnectSeconds
         reconnectSeconds = min(30L, reconnectSeconds * 2L)
+        RoverRuntimeState.log("WS reconnect scheduled in ${delay}s")
         scheduler.schedule({ connect() }, delay, TimeUnit.SECONDS)
     }
 
@@ -160,6 +166,7 @@ class RoverServerClient(
             socket = webSocket
             connected = true
             reconnectSeconds = 1
+            RoverRuntimeState.setServerState(true)
             onStatus("Server connected")
             sendHello(webSocket)
             runCatching { roomba.startSensorStream(DEFAULT_STREAM_PACKETS) }
@@ -171,12 +178,14 @@ class RoverServerClient(
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            RoverRuntimeState.log("WS closing code=$code reason=$reason")
             webSocket.close(code, reason)
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             if (socket === webSocket) socket = null
             connected = false
+            RoverRuntimeState.setServerState(false)
             onStatus("Server disconnected: $code $reason")
             scheduleReconnect()
         }
@@ -184,6 +193,8 @@ class RoverServerClient(
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             if (socket === webSocket) socket = null
             connected = false
+            RoverRuntimeState.setServerState(false)
+            RoverRuntimeState.log("WS failure response=${response?.code} exception=${t.stackTraceToString()}")
             onStatus("Server connection failed: ${t.message}")
             scheduleReconnect()
         }
@@ -192,6 +203,7 @@ class RoverServerClient(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         connected = false
+        RoverRuntimeState.setServerState(false)
         socket?.close(1000, "service stopping")
         socket = null
         scheduler.shutdownNow()
