@@ -33,7 +33,7 @@ object RoombaOi {
         byteArrayOf(STREAM.toByte(), packetIds.size.toByte()) + packetIds
 
     fun pauseResumeSensorStream(enable: Boolean): ByteArray =
-        byteArrayOf(PAUSE_RESUME_STREAM.toByte(), if (enable) 1 else 0)
+        byteArrayOf(PAUSE_RESUME_STREAM.toByte(), (if (enable) 1 else 0).toByte())
 
     fun defineSong(slot: Int, notes: List<RoombaSongNote>): ByteArray {
         require(slot in 0..4) { "song slot must be 0-4" }
