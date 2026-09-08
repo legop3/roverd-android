@@ -8,9 +8,9 @@ import android.content.IntentFilter
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import android.os.Build
-import com.hoho.android.usbserial.driver.SerialInputOutputManager
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
+import com.hoho.android.usbserial.util.SerialInputOutputManager
 import java.io.Closeable
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -129,8 +129,6 @@ class UsbRoomba(
             )
             port = openedPort
 
-            // USB UARTs can change control-line state when opened. Put BRC in
-            // its configured inactive state before anything else touches OI.
             setBrcAsserted(false)
 
             lastSensorFrameNs = System.nanoTime()
@@ -140,9 +138,6 @@ class UsbRoomba(
             onConnectionChanged(true)
             onStatus("USB serial connected: ${device.deviceName} @ ${config.baud}")
 
-            // The Pi implementation pulses BRC immediately on startup. The
-            // scheduler is single-threaded, so this runs after that initial
-            // one-second wake pulse and then starts the same OI stream as roverd.
             scheduler.schedule(
                 { recoverSensorStream("startup") },
                 config.brcPulseWidthMs + SENSOR_COMMAND_PAUSE_MS,
