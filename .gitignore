@@ -3,5 +3,6 @@
 local.properties
 /build/
 app/build/
+signing/roverd-update.p12
 *.iml
 .DS_Store
