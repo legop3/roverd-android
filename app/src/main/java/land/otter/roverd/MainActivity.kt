@@ -256,11 +256,16 @@ class MainActivity : Activity() {
     }
 
     private fun startRoverService() {
-        startForegroundService(Intent(this, RoverService::class.java))
+        startServiceCompat(Intent(this, RoverService::class.java))
     }
 
     private fun sendServiceAction(action: String) {
-        startForegroundService(Intent(this, RoverService::class.java).setAction(action))
+        startServiceCompat(Intent(this, RoverService::class.java).setAction(action))
+    }
+
+    private fun startServiceCompat(intent: Intent) {
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent)
+        else startService(intent)
     }
 
     private fun requestNotificationPermission() {
