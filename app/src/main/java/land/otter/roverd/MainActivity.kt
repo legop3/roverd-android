@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -205,6 +206,12 @@ class MainActivity : Activity() {
         } else {
             "${now - RoverRuntimeState.lastCommandAtMs} ms ago"
         }
+        val batteryOptimization = if (Build.VERSION.SDK_INT >= 23) {
+            val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (power.isIgnoringBatteryOptimizations(packageName)) "EXEMPT" else "ACTIVE"
+        } else {
+            "n/a (< API 23)"
+        }
         val cfg = RoverSettings.load(this)
 
         diagnosticsView.text = buildString {
@@ -215,6 +222,9 @@ class MainActivity : Activity() {
             appendLine("USB connected : ${RoverRuntimeState.usbConnected}")
             appendLine("USB device    : ${RoverRuntimeState.usbDevice.ifBlank { "-" }}")
             appendLine("WS connected  : ${RoverRuntimeState.serverConnected}")
+            appendLine("CPU wake lock : ${RoverRuntimeState.wakeLockHeld}")
+            appendLine("Wi-Fi lock    : ${RoverRuntimeState.wifiLockHeld}")
+            appendLine("battery opt   : $batteryOptimization")
             appendLine("serial        : ${cfg.baud} 8N1")
             appendLine("BRC           : ${cfg.brcLine} activeLow=${cfg.brcActiveLow} every=${cfg.brcPulseEveryMs}ms width=${cfg.brcPulseWidthMs}ms")
             appendLine("sensor frames : ${RoverRuntimeState.sensorFrames}")
