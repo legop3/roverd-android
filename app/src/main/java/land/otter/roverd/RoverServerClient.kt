@@ -136,9 +136,9 @@ class RoverServerClient(
                 connectedRoomba().motorPwm(p.optInt("main"), p.optInt("side"), p.optInt("vacuum"))
             }
             msg.has("sensorStream") -> {
-                if (msg.getJSONObject("sensorStream").optBoolean("enable")) {
-                    connectedRoomba().startSensorStream(DEFAULT_STREAM_PACKETS)
-                }
+                val enable = msg.getJSONObject("sensorStream").optBoolean("enable")
+                if (enable) connectedRoomba().startSensorStream(DEFAULT_STREAM_PACKETS)
+                else connectedRoomba().setSensorStreamEnabled(false)
             }
             msg.has("raw") && msg.optString("raw").isNotEmpty() -> {
                 val raw = Base64.decode(msg.getString("raw"), Base64.DEFAULT)
@@ -147,6 +147,23 @@ class RoverServerClient(
                 if (raw.isNotEmpty() && isModeOpcode(raw[0].toInt() and 0xff)) {
                     roomba.startSensorStream(DEFAULT_STREAM_PACKETS)
                 }
+            }
+            msg.has("song") -> {
+                val p = msg.getJSONObject("song")
+                val slot = p.optInt("slot", 0).coerceIn(0, 4)
+                val jsonNotes = p.getJSONArray("notes")
+                val notes = ArrayList<RoombaSongNote>(jsonNotes.length())
+                for (i in 0 until jsonNotes.length()) {
+                    val n = jsonNotes.getJSONObject(i)
+                    notes.add(
+                        RoombaSongNote(
+                            note = n.optInt("note"),
+                            duration = n.optInt("duration"),
+                        ),
+                    )
+                }
+                RoverRuntimeState.log("CMD song slot=$slot notes=${notes.size} loop=${p.optBoolean("loop", false)}")
+                connectedRoomba().playSong(slot, notes)
             }
             else -> throw UnsupportedOperationException("Unsupported command type: ${msg.optString("type", "unknown")}")
         }
