@@ -45,6 +45,7 @@ class UsbRoomba(
     @Volatile private var ioManager: SerialInputOutputManager? = null
     @Volatile private var lastSensorFrameNs = 0L
     @Volatile private var lastSensorRecoveryNs = 0L
+    @Volatile private var sensorStreamWanted = true
     private var brcTask: ScheduledFuture<*>? = null
     private var sensorWatchdogTask: ScheduledFuture<*>? = null
 
@@ -189,8 +190,17 @@ class UsbRoomba(
 
     fun startOi() = write(byteArrayOf(RoombaOi.START.toByte()))
     fun seekDock() = write(byteArrayOf(RoombaOi.SEEK_DOCK.toByte()))
-    fun startSensorStream(packetIds: ByteArray = RoombaOi.DEFAULT_STREAM_PACKETS) = write(RoombaOi.startSensorStream(packetIds))
-    fun setSensorStreamEnabled(enable: Boolean) = write(RoombaOi.pauseResumeSensorStream(enable))
+
+    fun startSensorStream(packetIds: ByteArray = RoombaOi.DEFAULT_STREAM_PACKETS) {
+        sensorStreamWanted = true
+        write(RoombaOi.startSensorStream(packetIds))
+    }
+
+    fun setSensorStreamEnabled(enable: Boolean) {
+        sensorStreamWanted = enable
+        if (enable) write(RoombaOi.startSensorStream(RoombaOi.DEFAULT_STREAM_PACKETS))
+        else write(RoombaOi.pauseResumeSensorStream(false))
+    }
 
     fun playSong(slot: Int, notes: List<RoombaSongNote>) {
         write(RoombaOi.defineSong(slot, notes))
@@ -204,6 +214,7 @@ class UsbRoomba(
     }
 
     fun restartSensorStreamNow() {
+        sensorStreamWanted = true
         scheduler.execute { recoverSensorStream("manual") }
     }
 
@@ -251,6 +262,7 @@ class UsbRoomba(
         sensorWatchdogTask?.cancel(false)
         sensorWatchdogTask = scheduler.scheduleAtFixedRate(
             {
+                if (!sensorStreamWanted) return@scheduleAtFixedRate
                 val p = port ?: return@scheduleAtFixedRate
                 if (p !== port) return@scheduleAtFixedRate
                 val now = System.nanoTime()
@@ -268,7 +280,7 @@ class UsbRoomba(
     }
 
     private fun recoverSensorStream(reason: String) {
-        if (port == null) return
+        if (port == null || !sensorStreamWanted) return
         try {
             RoverRuntimeState.log("SENSOR recovery start reason=$reason")
             startOi()
