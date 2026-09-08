@@ -12,7 +12,7 @@
     <application
         android:allowBackup="false"
         android:label="Roverd Android"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@android:style/Theme.Holo.Light.NoActionBar">
 
         <activity
             android:name=".MainActivity"
