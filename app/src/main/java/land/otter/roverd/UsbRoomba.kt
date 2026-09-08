@@ -85,6 +85,8 @@ class UsbRoomba(
         }
     }
 
+    fun isConnected(): Boolean = port != null
+
     fun connect() {
         if (port != null) return
         val drivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
