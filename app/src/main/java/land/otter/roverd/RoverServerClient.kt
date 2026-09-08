@@ -1,0 +1,201 @@
+package land.otter.roverd
+
+import android.util.Base64
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import org.json.JSONObject
+import java.io.Closeable
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.min
+
+class RoverServerClient(
+    private val config: RoverConfig,
+    private val roomba: UsbRoomba,
+    private val onStatus: (String) -> Unit,
+) : Closeable {
+
+    companion object {
+        val DEFAULT_STREAM_PACKETS = byteArrayOf(100, 21, 34)
+    }
+
+    private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
+    private val http = OkHttpClient.Builder()
+        .pingInterval(10, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
+
+    private val closed = AtomicBoolean(false)
+    @Volatile private var socket: WebSocket? = null
+    @Volatile private var connected = false
+    private var reconnectSeconds = 1L
+    private var lastSensorSentNs = 0L
+
+    fun start() {
+        connect()
+    }
+
+    private fun connect() {
+        if (closed.get() || connected || socket != null) return
+        onStatus("Connecting to ${config.serverUrl}")
+        val request = Request.Builder().url(config.serverUrl).build()
+        socket = http.newWebSocket(request, Listener())
+    }
+
+    fun sendSensorFrame(frame: ByteArray) {
+        if (!connected) return
+        val now = System.nanoTime()
+        if (now - lastSensorSentNs < 50_000_000L) return
+        lastSensorSentNs = now
+        val msg = JSONObject()
+            .put("type", "sensor")
+            .put("ts", System.currentTimeMillis())
+            .put("data", Base64.encodeToString(frame, Base64.NO_WRAP))
+        socket?.send(msg.toString())
+    }
+
+    private fun sendHello(ws: WebSocket) {
+        val disabledToggle = JSONObject()
+            .put("enabled", false)
+            .put("gpioPin", -1)
+            .put("gpioChip", "")
+            .put("initialOn", false)
+            .put("activeLow", false)
+
+        val hello = JSONObject()
+            .put("type", "hello")
+            .put("name", config.name)
+            .put("description", "Android phone rover")
+            .put("color", "#4DB6AC")
+            .put("battery", JSONObject()
+                .put("full", 2068)
+                .put("warn", 1700)
+                .put("urgent", 1650))
+            .put("maxWheelSpeed", config.maxWheelSpeed)
+            .put("media", JSONObject()
+                .put("manage", false)
+                .put("video", JSONObject().put("enabled", false))
+                .put("audioCapture", JSONObject().put("enabled", false))
+                .put("audioPlayback", JSONObject().put("enabled", false)))
+            .put("cameraServo", JSONObject().put("enabled", false))
+            .put("audio", JSONObject().put("ttsEnabled", false))
+            .put("horn", JSONObject().put("enabled", false))
+            .put("headlight", disabledToggle)
+            .put("laser", JSONObject(disabledToggle.toString()))
+            .put("private", JSONObject().put("enabled", false))
+            .put("platform", JSONObject()
+                .put("type", "android")
+                .put("appVersion", "0.1.0"))
+
+        ws.send(hello.toString())
+    }
+
+    private fun handleCommand(ws: WebSocket, text: String) {
+        val msg = runCatching { JSONObject(text) }.getOrElse {
+            onStatus("Invalid server JSON: ${it.message}")
+            return
+        }
+        val id = msg.optString("id")
+        if (id.isEmpty()) return
+
+        try {
+            dispatch(msg)
+            sendAck(ws, id, null)
+        } catch (t: Throwable) {
+            sendAck(ws, id, t.message ?: t.javaClass.simpleName)
+        }
+    }
+
+    private fun dispatch(msg: JSONObject) {
+        when {
+            msg.has("driveDirect") -> {
+                val p = msg.getJSONObject("driveDirect")
+                roomba.driveDirect(p.optInt("left"), p.optInt("right"))
+            }
+            msg.has("motorPwm") -> {
+                val p = msg.getJSONObject("motorPwm")
+                roomba.motorPwm(p.optInt("main"), p.optInt("side"), p.optInt("vacuum"))
+            }
+            msg.has("sensorStream") -> {
+                if (msg.getJSONObject("sensorStream").optBoolean("enable")) {
+                    roomba.startSensorStream(DEFAULT_STREAM_PACKETS)
+                }
+            }
+            msg.has("raw") && msg.optString("raw").isNotEmpty() -> {
+                val raw = Base64.decode(msg.getString("raw"), Base64.DEFAULT)
+                roomba.write(raw)
+                if (raw.isNotEmpty() && isModeOpcode(raw[0].toInt() and 0xff)) {
+                    roomba.startSensorStream(DEFAULT_STREAM_PACKETS)
+                }
+            }
+            else -> throw UnsupportedOperationException("Unsupported command type: ${msg.optString("type", "unknown")}")
+        }
+    }
+
+    private fun isModeOpcode(opcode: Int): Boolean = opcode == 128 || opcode == 131 || opcode == 132
+
+    private fun sendAck(ws: WebSocket, id: String, error: String?) {
+        val ack = JSONObject()
+            .put("type", "ack")
+            .put("id", id)
+            .put("status", if (error == null) "ok" else "error")
+        if (error != null) ack.put("error", error)
+        ws.send(ack.toString())
+    }
+
+    private fun scheduleReconnect() {
+        if (closed.get()) return
+        val delay = reconnectSeconds
+        reconnectSeconds = min(30L, reconnectSeconds * 2L)
+        scheduler.schedule({ connect() }, delay, TimeUnit.SECONDS)
+    }
+
+    private inner class Listener : WebSocketListener() {
+        override fun onOpen(webSocket: WebSocket, response: Response) {
+            socket = webSocket
+            connected = true
+            reconnectSeconds = 1
+            onStatus("Server connected")
+            sendHello(webSocket)
+            runCatching { roomba.startSensorStream(DEFAULT_STREAM_PACKETS) }
+                .onFailure { onStatus("Sensor stream start failed: ${it.message}") }
+        }
+
+        override fun onMessage(webSocket: WebSocket, text: String) {
+            handleCommand(webSocket, text)
+        }
+
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            webSocket.close(code, reason)
+        }
+
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+            if (socket === webSocket) socket = null
+            connected = false
+            onStatus("Server disconnected: $code $reason")
+            scheduleReconnect()
+        }
+
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            if (socket === webSocket) socket = null
+            connected = false
+            onStatus("Server connection failed: ${t.message}")
+            scheduleReconnect()
+        }
+    }
+
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        connected = false
+        socket?.close(1000, "service stopping")
+        socket = null
+        scheduler.shutdownNow()
+        http.dispatcher.executorService.shutdown()
+        http.connectionPool.evictAll()
+    }
+}
