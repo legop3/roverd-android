@@ -22,20 +22,30 @@ class UsbRoomba(
     private val config: RoverConfig,
     private val onSensorFrame: (ByteArray) -> Unit,
     private val onStatus: (String) -> Unit,
+    private val onConnectionChanged: (Boolean) -> Unit = {},
 ) : Closeable, SerialInputOutputManager.Listener {
 
     companion object {
         private const val ACTION_USB_PERMISSION = "land.otter.roverd.USB_PERMISSION"
+        private const val SENSOR_SILENCE_MS = 5_000L
+        private const val SENSOR_RECOVERY_COOLDOWN_MS = 3_000L
+        private const val SENSOR_COMMAND_PAUSE_MS = 50L
     }
 
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
-    private val framer = SensorFramer(onSensorFrame)
     private val writeLock = Any()
+    private val framer = SensorFramer { frame ->
+        lastSensorFrameNs = System.nanoTime()
+        onSensorFrame(frame)
+    }
 
     @Volatile private var port: UsbSerialPort? = null
     @Volatile private var ioManager: SerialInputOutputManager? = null
+    @Volatile private var lastSensorFrameNs = 0L
+    @Volatile private var lastSensorRecoveryNs = 0L
     private var brcTask: ScheduledFuture<*>? = null
+    private var sensorWatchdogTask: ScheduledFuture<*>? = null
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -119,13 +129,25 @@ class UsbRoomba(
             )
             port = openedPort
 
-            // Always put the BRC control output in its inactive state immediately
-            // after enumeration/open before the periodic pulse task is started.
+            // USB UARTs can change control-line state when opened. Put BRC in
+            // its configured inactive state before anything else touches OI.
             setBrcAsserted(false)
 
+            lastSensorFrameNs = System.nanoTime()
             ioManager = SerialInputOutputManager(openedPort, this).also { it.start() }
             startBrcPulser()
+            startSensorWatchdog()
+            onConnectionChanged(true)
             onStatus("USB serial connected: ${device.deviceName} @ ${config.baud}")
+
+            // The Pi implementation pulses BRC immediately on startup. The
+            // scheduler is single-threaded, so this runs after that initial
+            // one-second wake pulse and then starts the same OI stream as roverd.
+            scheduler.schedule(
+                { recoverSensorStream("startup") },
+                config.brcPulseWidthMs + SENSOR_COMMAND_PAUSE_MS,
+                TimeUnit.MILLISECONDS,
+            )
         } catch (t: Throwable) {
             runCatching { connection.close() }
             closePort()
@@ -136,6 +158,7 @@ class UsbRoomba(
     fun write(bytes: ByteArray) {
         val p = port ?: throw IllegalStateException("USB serial is not connected")
         synchronized(writeLock) {
+            if (p !== port) throw IllegalStateException("USB serial disconnected")
             p.write(bytes, 500)
         }
     }
@@ -151,19 +174,19 @@ class UsbRoomba(
 
     fun startOi() = write(byteArrayOf(RoombaOi.START.toByte()))
     fun seekDock() = write(byteArrayOf(RoombaOi.SEEK_DOCK.toByte()))
-    fun startSensorStream(packetIds: ByteArray) = write(RoombaOi.startSensorStream(packetIds))
+    fun startSensorStream(packetIds: ByteArray = RoombaOi.DEFAULT_STREAM_PACKETS) = write(RoombaOi.startSensorStream(packetIds))
 
     private fun startBrcPulser() {
         brcTask?.cancel(false)
-        brcTask = scheduler.scheduleWithFixedDelay(
+        brcTask = scheduler.scheduleAtFixedRate(
             {
                 try {
                     pulseBrc()
                 } catch (t: Throwable) {
-                    onStatus("BRC pulse failed: ${t.message}")
+                    if (port != null) onStatus("BRC pulse failed: ${t.message}")
                 }
             },
-            config.brcPulseEveryMs,
+            0,
             config.brcPulseEveryMs,
             TimeUnit.MILLISECONDS,
         )
@@ -179,15 +202,47 @@ class UsbRoomba(
         }
     }
 
+    private fun startSensorWatchdog() {
+        sensorWatchdogTask?.cancel(false)
+        sensorWatchdogTask = scheduler.scheduleAtFixedRate(
+            {
+                val p = port ?: return@scheduleAtFixedRate
+                if (p !== port) return@scheduleAtFixedRate
+                val now = System.nanoTime()
+                val idleMs = TimeUnit.NANOSECONDS.toMillis(now - lastSensorFrameNs)
+                val sinceRecoveryMs = TimeUnit.NANOSECONDS.toMillis(now - lastSensorRecoveryNs)
+                if (idleMs >= SENSOR_SILENCE_MS && sinceRecoveryMs >= SENSOR_RECOVERY_COOLDOWN_MS) {
+                    lastSensorRecoveryNs = now
+                    recoverSensorStream("${idleMs}ms silence")
+                }
+            },
+            1,
+            1,
+            TimeUnit.SECONDS,
+        )
+    }
+
+    private fun recoverSensorStream(reason: String) {
+        if (port == null) return
+        try {
+            startOi()
+            Thread.sleep(SENSOR_COMMAND_PAUSE_MS)
+            startSensorStream()
+            onStatus("Sensor stream restarted ($reason)")
+        } catch (t: Throwable) {
+            if (port != null) onStatus("Sensor stream recovery failed: ${t.message}")
+        }
+    }
+
     private fun setBrcAsserted(asserted: Boolean) {
         val p = port ?: return
-        // activeLow describes the physical BRC level desired. For the common
-        // cheap adapters used by this project, false corresponds to the low
-        // control-line state; the setting is exposed so an adapter can be flipped.
         val controlState = if (config.brcActiveLow) !asserted else asserted
-        when (config.brcLine) {
-            BrcLine.RTS -> p.setRTS(controlState)
-            BrcLine.DTR -> p.setDTR(controlState)
+        synchronized(writeLock) {
+            if (p !== port) return
+            when (config.brcLine) {
+                BrcLine.RTS -> p.setRTS(controlState)
+                BrcLine.DTR -> p.setDTR(controlState)
+            }
         }
     }
 
@@ -198,17 +253,27 @@ class UsbRoomba(
     override fun onRunError(e: Exception) {
         onStatus("USB serial read error: ${e.message}")
         closePort()
-        scheduler.schedule({ connect() }, 2, TimeUnit.SECONDS)
+        runCatching {
+            scheduler.schedule({ connect() }, 2, TimeUnit.SECONDS)
+        }
     }
 
     private fun closePort() {
+        val p = port
+        val wasConnected = p != null
+
         brcTask?.cancel(false)
         brcTask = null
+        sensorWatchdogTask?.cancel(false)
+        sensorWatchdogTask = null
+
+        if (p != null) runCatching { setBrcAsserted(false) }
         ioManager?.stop()
         ioManager = null
-        val p = port
         port = null
         if (p != null) runCatching { p.close() }
+
+        if (wasConnected) onConnectionChanged(false)
     }
 
     override fun close() {
