@@ -4,7 +4,9 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.IBinder
 
 class RoverService : Service() {
@@ -78,18 +80,25 @@ class RoverService : Service() {
 
     private fun status(message: String) {
         RoverRuntimeState.update(message)
-        val manager = getSystemService(NotificationManager::class.java)
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIFICATION_ID, buildNotification(message))
     }
 
+    @Suppress("DEPRECATION")
     private fun buildNotification(text: String): Notification {
-        val manager = getSystemService(NotificationManager::class.java)
-        if (manager.getNotificationChannel(CHANNEL_ID) == null) {
-            manager.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "Rover runtime", NotificationManager.IMPORTANCE_LOW),
-            )
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val builder = if (Build.VERSION.SDK_INT >= 26) {
+            if (manager.getNotificationChannel(CHANNEL_ID) == null) {
+                manager.createNotificationChannel(
+                    NotificationChannel(CHANNEL_ID, "Rover runtime", NotificationManager.IMPORTANCE_LOW),
+                )
+            }
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            Notification.Builder(this)
         }
-        return Notification.Builder(this, CHANNEL_ID)
+
+        return builder
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle("Roverd Android")
             .setContentText(text)
