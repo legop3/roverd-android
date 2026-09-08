@@ -14,7 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      issues: write
 
     steps:
       - name: Checkout
@@ -38,26 +37,7 @@ jobs:
           gradle-version: '9.6.0'
 
       - name: Build debug APK
-        id: build
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          gradle :app:assembleDebug --stacktrace 2>&1 | tee build.log
-
-      - name: Report build failure temporarily
-        if: steps.build.outcome == 'failure'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          {
-            echo 'Automated temporary CI diagnostic. This will be removed after the build is fixed.'
-            echo
-            echo '```text'
-            tail -n 180 build.log
-            echo '```'
-          } > issue-body.md
-          gh issue create --title "TEMP CI diagnostic ${GITHUB_SHA::7}" --body-file issue-body.md
-          exit 1
+        run: gradle :app:assembleDebug --stacktrace
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
