@@ -190,6 +190,12 @@ class UsbRoomba(
     fun startOi() = write(byteArrayOf(RoombaOi.START.toByte()))
     fun seekDock() = write(byteArrayOf(RoombaOi.SEEK_DOCK.toByte()))
     fun startSensorStream(packetIds: ByteArray = RoombaOi.DEFAULT_STREAM_PACKETS) = write(RoombaOi.startSensorStream(packetIds))
+    fun setSensorStreamEnabled(enable: Boolean) = write(RoombaOi.pauseResumeSensorStream(enable))
+
+    fun playSong(slot: Int, notes: List<RoombaSongNote>) {
+        write(RoombaOi.defineSong(slot, notes))
+        write(RoombaOi.playSong(slot))
+    }
 
     fun reconnect() {
         RoverRuntimeState.log("MANUAL USB reconnect")
