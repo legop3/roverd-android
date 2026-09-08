@@ -8,7 +8,7 @@ android {
 
     defaultConfig {
         applicationId = "land.otter.roverd"
-        minSdk = 26
+        minSdk = 17
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
@@ -22,5 +22,7 @@ android {
 
 dependencies {
     implementation("com.github.mik3y:usb-serial-for-android:3.11.0")
-    implementation("com.squareup.okhttp3:okhttp:5.3.0")
+    // 3.12.x is the final OkHttp line supporting pre-Android-5 devices.
+    // Rover connections are normally plain ws:// on the local network.
+    implementation("com.squareup.okhttp3:okhttp:3.12.13")
 }
