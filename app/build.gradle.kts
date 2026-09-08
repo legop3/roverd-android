@@ -2,6 +2,9 @@ plugins {
     id("com.android.application")
 }
 
+val ciBuildNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
+val roverSigningFile = rootProject.file("signing/roverd-update.p12")
+
 android {
     namespace = "land.otter.roverd"
     compileSdk = 36
@@ -10,8 +13,30 @@ android {
         applicationId = "land.otter.roverd"
         minSdk = 17
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // Keep every CI build newer than the original versionCode=1 APK.
+        versionCode = 1000 + ciBuildNumber
+        versionName = "0.1.$ciBuildNumber"
+    }
+
+    signingConfigs {
+        if (roverSigningFile.exists()) {
+            create("roverUpdate") {
+                storeFile = roverSigningFile
+                storePassword = "roverd-update-key"
+                keyAlias = "roverd"
+                keyPassword = "roverd-update-key"
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("debug") {
+            // CI decodes the permanent rover signing key before Gradle runs.
+            // Local builds without that file continue to use Android's normal debug key.
+            if (roverSigningFile.exists()) {
+                signingConfig = signingConfigs.getByName("roverUpdate")
+            }
+        }
     }
 
     compileOptions {
