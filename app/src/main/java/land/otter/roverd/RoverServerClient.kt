@@ -194,7 +194,7 @@ class RoverServerClient(
             if (socket === webSocket) socket = null
             connected = false
             RoverRuntimeState.setServerState(false)
-            RoverRuntimeState.log("WS failure response=${response?.code} exception=${t.stackTraceToString()}")
+            RoverRuntimeState.log("WS failure response=${response?.code()} exception=${t.stackTraceToString()}")
             onStatus("Server connection failed: ${t.message}")
             scheduleReconnect()
         }
@@ -207,7 +207,7 @@ class RoverServerClient(
         socket?.close(1000, "service stopping")
         socket = null
         scheduler.shutdownNow()
-        http.dispatcher.executorService.shutdown()
-        http.connectionPool.evictAll()
+        http.dispatcher().executorService().shutdown()
+        http.connectionPool().evictAll()
     }
 }
