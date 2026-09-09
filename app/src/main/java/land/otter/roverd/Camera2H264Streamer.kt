@@ -124,6 +124,19 @@ class Camera2H264Streamer(
             throw IllegalStateException("Could not prepare H.264 ${outputWidth}x${outputHeight}@$fps")
         }
 
+        // RootEncoder 2.8.1's StreamBase starts AudioEncoder unconditionally, even when the
+        // configured source is NoAudioSource. Prepare that encoder so startStream can run, while
+        // RoverH264Stream still discards all audio and the RTSP publisher remains video-only.
+        val audioShimPrepared = roverStream.prepareAudio(
+            sampleRate = 44_100,
+            isStereo = false,
+            bitrate = 32_000,
+        )
+        if (!audioShimPrepared) {
+            throw IllegalStateException("Could not prepare RootEncoder video-only audio shim")
+        }
+        RoverRuntimeState.log("CAMERA RootEncoder NoAudioSource encoder shim prepared")
+
         applyFixedLandscapeGeometry(roverStream, orientation)
         roverStream.startStream(publishUrl)
         applyFixedLandscapeGeometry(roverStream, orientation)
