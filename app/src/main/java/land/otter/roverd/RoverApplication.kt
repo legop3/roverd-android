@@ -1,8 +1,8 @@
 package land.otter.roverd
 
-import android.app.Application
+import androidx.multidex.MultiDexApplication
 
-class RoverApplication : Application() {
+class RoverApplication : MultiDexApplication() {
     override fun onCreate() {
         super.onCreate()
         RoverRuntimeState.initialize(this)
