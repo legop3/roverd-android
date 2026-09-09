@@ -6,15 +6,83 @@ import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaRecorder
 import android.os.Build
 
 @TargetApi(21)
 object Camera2Diagnostics {
-    fun cameraIds(context: Context): List<String> {
+    fun cameraIds(context: Context): List<String> = cameraChoices(context).map { it.id }
+
+    fun cameraChoices(context: Context): List<CameraChoice> {
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-        return runCatching { manager.cameraIdList.toList() }.getOrElse { emptyList() }
+        return runCatching {
+            manager.cameraIdList.map { id ->
+                val c = manager.getCameraCharacteristics(id)
+                val facing = facingName(c.get(CameraCharacteristics.LENS_FACING))
+                val orientation = c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+                val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    ?.joinToString("/") { "${it}mm" }
+                    .orEmpty()
+                val extras = listOf(facing, "sensor ${orientation}°", focal)
+                    .filter { it.isNotBlank() }
+                    .joinToString(" — ")
+                CameraChoice(id, "$id — $extras")
+            }
+        }.getOrElse { emptyList() }
     }
+
+    fun modeCatalog(context: Context, cameraId: String): CameraModeCatalog? {
+        val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+        return runCatching {
+            val c = manager.getCameraCharacteristics(cameraId)
+            val facing = facingName(c.get(CameraCharacteristics.LENS_FACING))
+            val orientation = c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+            val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val sizes = map?.getOutputSizes(SurfaceTexture::class.java)
+                ?.map { CameraSizeOption(it.width, it.height) }
+                ?.distinctBy { it.width to it.height }
+                ?.sortedWith(compareByDescending<CameraSizeOption> { it.width.toLong() * it.height }.thenByDescending { it.width })
+                .orEmpty()
+            val fps = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                ?.map { CameraFpsOption(it.lower, it.upper) }
+                ?.distinctBy { it.min to it.max }
+                ?.sortedWith(compareBy<CameraFpsOption> { it.max }.thenBy { it.min })
+                .orEmpty()
+            val exposureRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+            val exposureStep = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
+            val effects = c.get(CameraCharacteristics.CONTROL_AVAILABLE_EFFECTS)
+                ?.map { effectName(it) }
+                .orEmpty()
+            val label = cameraChoices(context).firstOrNull { it.id == cameraId }?.label ?: cameraId
+            CameraModeCatalog(
+                id = cameraId,
+                label = label,
+                facing = facing,
+                sensorOrientation = orientation,
+                sizes = sizes,
+                fpsRanges = fps,
+                exposureCompMin = exposureRange?.lower ?: 0,
+                exposureCompMax = exposureRange?.upper ?: 0,
+                exposureCompStep = exposureStep?.toFloat() ?: 0f,
+                effectModes = effects,
+            )
+        }.getOrNull()
+    }
+
+    fun h264SurfaceEncoders(): List<String> = runCatching {
+        MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
+            .filter { it.isEncoder && it.supportedTypes.any { type -> type.equals("video/avc", true) } }
+            .filter { info ->
+                runCatching {
+                    info.getCapabilitiesForType("video/avc")
+                        .colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                }.getOrDefault(false)
+            }
+            .map { it.name }
+            .distinct()
+    }.getOrElse { emptyList() }
 
     fun snapshot(context: Context): String {
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -43,6 +111,9 @@ object Camera2Diagnostics {
                 val maxZoom = c.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM)
                 val fpsRanges = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
                 val capabilities = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+                val effects = c.get(CameraCharacteristics.CONTROL_AVAILABLE_EFFECTS)
+                val exposureRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+                val exposureStep = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
 
                 appendLine("LENS_FACING raw=$facing (${facingName(facing)})")
                 appendLine("SENSOR_ORIENTATION=$orientation")
@@ -52,6 +123,8 @@ object Camera2Diagnostics {
                 appendLine("ACTIVE_ARRAY=${formatValue(activeArray)}")
                 appendLine("MAX_DIGITAL_ZOOM=${formatValue(maxZoom)}")
                 appendLine("AE_FPS_RANGES=${formatValue(fpsRanges)}")
+                appendLine("AE_COMP_RANGE=${formatValue(exposureRange)} step=${formatValue(exposureStep)}")
+                appendLine("EFFECTS=${effects?.joinToString { effectName(it) } ?: "null"}")
                 appendLine("CAPABILITIES=${formatValue(capabilities)}")
 
                 if (Build.VERSION.SDK_INT >= 28) {
@@ -89,6 +162,19 @@ object Camera2Diagnostics {
         2 -> "EXTERNAL"
         null -> "UNKNOWN/null"
         else -> "UNKNOWN"
+    }
+
+    private fun effectName(value: Int): String = when (value) {
+        0 -> "OFF"
+        1 -> "MONO"
+        2 -> "NEGATIVE"
+        3 -> "SOLARIZE"
+        4 -> "SEPIA"
+        5 -> "POSTERIZE"
+        6 -> "WHITEBOARD"
+        7 -> "BLACKBOARD"
+        8 -> "AQUA"
+        else -> "UNKNOWN($value)"
     }
 
     private fun hardwareLevelName(value: Int?): String = when (value) {
