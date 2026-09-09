@@ -16,6 +16,9 @@ android {
         // Keep every CI build newer than the original versionCode=1 APK.
         versionCode = 1000 + ciBuildNumber
         versionName = "0.1.$ciBuildNumber"
+        // RootEncoder 2.8.x pushes the API-17 build over the legacy 64K DEX method limit.
+        // Keep the old Android floor by using the AndroidX multidex bootstrap.
+        multiDexEnabled = true
     }
 
     signingConfigs {
@@ -51,7 +54,9 @@ dependencies {
     // Rover connections are normally plain ws:// on the local network.
     implementation("com.squareup.okhttp3:okhttp:3.12.13")
 
-    // Camera2/MediaCodec/RTSP implementation used by the API 21+ camera subsystem.
-    // The library itself keeps minSdk 16, so the rover app can retain its API 17 floor.
+    implementation("androidx.multidex:multidex:2.0.1")
+
+    // Camera2/MediaCodec implementation used by the API 21+ camera subsystem.
+    // The root build pins all RootEncoder modules to the same current release.
     implementation("com.github.pedroSG94.RootEncoder:library:2.8.0")
 }
