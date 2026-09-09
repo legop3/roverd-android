@@ -5,16 +5,12 @@ import android.content.Context
 import android.os.Build
 import android.view.Surface
 import android.view.WindowManager
-import com.pedro.encoder.input.gl.render.filters.RotationFilterRender
 import com.pedro.encoder.input.video.CameraCallbacks
 import com.pedro.encoder.input.video.CameraHelper
 import com.pedro.encoder.utils.CodecUtil
-import com.pedro.library.view.GlStreamInterface
 import java.io.Closeable
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.max
-import kotlin.math.min
 
 @TargetApi(21)
 class Camera2H264Streamer(
@@ -30,11 +26,6 @@ class Camera2H264Streamer(
     private var statsThread: Thread? = null
 
     private val publishUrl: String by lazy { MediaUrl.videoPublishUrl(config) }
-
-    // The encoded rover stream is always landscape. Camera rotation is rendered into this fixed
-    // canvas before MediaCodec, so rotation can never swap the H.264 dimensions.
-    private val outputWidth = max(config.cameraWidth, config.cameraHeight)
-    private val outputHeight = min(config.cameraWidth, config.cameraHeight)
 
     private data class OrientationPlan(
         val sensorMount: Int,
@@ -53,6 +44,17 @@ class Camera2H264Streamer(
         val source = RoverCamera2Source(appContext, config.cameraId)
         val roverStream = RoverH264Stream(appContext, source)
         stream = roverStream
+
+        val encodedWidth = if (orientation.pixelRotation == 90 || orientation.pixelRotation == 270) {
+            config.cameraHeight
+        } else {
+            config.cameraWidth
+        }
+        val encodedHeight = if (orientation.pixelRotation == 90 || orientation.pixelRotation == 270) {
+            config.cameraWidth
+        } else {
+            config.cameraHeight
+        }
 
         val codecPreference = when (config.cameraEncoderName.uppercase(Locale.US)) {
             "HARDWARE" -> CodecUtil.CodecType.HARDWARE
@@ -95,8 +97,8 @@ class Camera2H264Streamer(
             state = "Preparing Camera2 + RootEncoder",
             cameraId = config.cameraId,
             encoderName = "RootEncoder 2.8.1 encoder / ${codecPreference.name} + roverd RTSP",
-            width = outputWidth,
-            height = outputHeight,
+            width = encodedWidth,
+            height = encodedHeight,
             fps = fps,
             bitrate = config.cameraBitrate,
             publishUrl = publishUrl,
@@ -104,22 +106,29 @@ class Camera2H264Streamer(
         )
 
         RoverRuntimeState.log(
-            "CAMERA prepare id=${config.cameraId} selected=${config.cameraWidth}x${config.cameraHeight} " +
-                "encodedCanvas=${outputWidth}x${outputHeight} fps=$fps bitrate=${config.cameraBitrate} " +
-                "sensor=${orientation.sensorMount} display=${orientation.displayRotation} pixels=${orientation.pixelRotation} " +
-                "automatic=${orientation.automatic} facing=${orientation.facing} codec=${codecPreference.name}",
+            "CAMERA prepare id=${config.cameraId} cameraMode=${config.cameraWidth}x${config.cameraHeight} " +
+                "rotation=${orientation.pixelRotation} encoded=${encodedWidth}x${encodedHeight} " +
+                "fps=$fps bitrate=${config.cameraBitrate} sensor=${orientation.sensorMount} " +
+                "display=${orientation.displayRotation} automatic=${orientation.automatic} " +
+                "facing=${orientation.facing} codec=${codecPreference.name}",
         )
 
+        // Use the selected camera mode exactly as selected. RootEncoder owns the rotation geometry.
+        // For 90/270 degrees its MediaCodec path swaps the encoded width/height, which is fine:
+        // MediaMTX and browsers do not require a fixed landscape or 4:3 video size.
         val prepared = roverStream.prepareVideo(
-            width = outputWidth,
-            height = outputHeight,
+            width = config.cameraWidth,
+            height = config.cameraHeight,
             bitrate = config.cameraBitrate.coerceAtLeast(64_000),
             fps = fps,
             iFrameInterval = 2,
-            rotation = 0,
+            rotation = orientation.pixelRotation,
         )
         if (!prepared) {
-            throw IllegalStateException("Could not prepare H.264 ${outputWidth}x${outputHeight}@$fps")
+            throw IllegalStateException(
+                "Could not prepare H.264 cameraMode=${config.cameraWidth}x${config.cameraHeight} " +
+                    "rotation=${orientation.pixelRotation}",
+            )
         }
 
         // RootEncoder 2.8.1's StreamBase starts AudioEncoder unconditionally, even when the
@@ -135,7 +144,6 @@ class Camera2H264Streamer(
         }
         RoverRuntimeState.log("CAMERA RootEncoder NoAudioSource encoder shim prepared")
 
-        configureAspectSafeRotation(roverStream, orientation)
         roverStream.startStream(publishUrl)
 
         RoverRuntimeState.setCameraPipelineState(
@@ -175,42 +183,6 @@ class Camera2H264Streamer(
     }
 
     private fun normalizeRotation(value: Int): Int = (((value % 360) + 360) % 360 / 90) * 90
-
-    /**
-     * Do not use RootEncoder's stream-rotation/portrait viewport path here. That path is designed
-     * around phone portrait streaming and can change the effective viewport aspect.
-     *
-     * Instead, keep the encoder/output path completely landscape and unrotated, then use
-     * RotationFilterRender.setRotationFixed(), which is RootEncoder's own aspect-preserving path
-     * for 90/270 degree rotations. This keeps the camera image's geometry correct without changing
-     * or squeezing the H.264 canvas.
-     */
-    private fun configureAspectSafeRotation(roverStream: RoverH264Stream, orientation: OrientationPlan) {
-        val gl = roverStream.getGlInterface() as? GlStreamInterface ?: return
-
-        gl.autoHandleOrientation = false
-        gl.setRotation(0)
-        gl.setEncoderSize(outputWidth, outputHeight)
-        gl.setStreamIsPortrait(false)
-        gl.setStreamRotation(0)
-        gl.setStreamViewPort(null)
-
-        val rotationFilter = RotationFilterRender().apply {
-            setRotationFixed(
-                orientation.pixelRotation,
-                outputWidth,
-                outputHeight,
-                false,
-            )
-        }
-        gl.setFilter(rotationFilter)
-
-        RoverRuntimeState.log(
-            "CAMERA geometry canvas=${outputWidth}x${outputHeight} " +
-                "filterRotation=${orientation.pixelRotation} streamRotation=0 portrait=false viewport=default " +
-                "mode=RotationFilterRender.setRotationFixed",
-        )
-    }
 
     private fun startStatsThread() {
         statsThread = Thread({
