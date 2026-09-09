@@ -50,4 +50,8 @@ dependencies {
     // 3.12.x is the final OkHttp line supporting pre-Android-5 devices.
     // Rover connections are normally plain ws:// on the local network.
     implementation("com.squareup.okhttp3:okhttp:3.12.13")
+
+    // Camera2/MediaCodec/RTSP implementation used by the API 21+ camera subsystem.
+    // The library itself keeps minSdk 16, so the rover app can retain its API 17 floor.
+    implementation("com.github.pedroSG94.RootEncoder:library:2.8.0")
 }
