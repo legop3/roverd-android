@@ -38,7 +38,6 @@ class MicSettingsView(context: Context) : ScrollView(context) {
     private val gainView = EditText(context)
     private val echoView = CheckBox(context)
     private val noiseView = CheckBox(context)
-    private val rtspPortView = EditText(context)
     private val publishUrlView = EditText(context)
 
     private val refreshTask = object : Runnable {
@@ -109,9 +108,9 @@ class MicSettingsView(context: Context) : ScrollView(context) {
         noiseView.isChecked = cfg.micNoiseSuppressor
         root.addView(noiseView)
 
-        label(root, "MediaMTX RTSP port")
-        rtspPortView.setText(cfg.micRtspPort.toString())
-        root.addView(rtspPortView)
+        root.addView(diagnostic(10f).apply {
+            text = "Shared MediaMTX RTSP port: ${cfg.mediaRtspPort} (SYSTEM tab)"
+        })
 
         label(root, "RTSP publish URL override (blank = server host + rover-name-audio)")
         publishUrlView.setText(cfg.micPublishUrl)
@@ -171,14 +170,13 @@ class MicSettingsView(context: Context) : ScrollView(context) {
             micGainDb = (gainView.text.toString().toIntOrNull() ?: old.micGainDb).coerceIn(-20, 30),
             micEchoCanceler = echoView.isChecked,
             micNoiseSuppressor = noiseView.isChecked,
-            micRtspPort = (rtspPortView.text.toString().toIntOrNull() ?: old.micRtspPort).coerceIn(1, 65_535),
             micPublishUrl = publishUrlView.text.toString().trim(),
         )
         RoverSettings.save(context, cfg)
         RoverRuntimeState.log(
             "UI saved MIC settings enabled=${cfg.micEnabled} source=${cfg.micAudioSource} " +
                 "rate=${cfg.micSampleRate} channels=${cfg.micChannels} bitrate=${cfg.micBitrate} gain=${cfg.micGainDb}dB " +
-                "echo=${cfg.micEchoCanceler} noise=${cfg.micNoiseSuppressor} url=${effectiveUrl(cfg)}",
+                "echo=${cfg.micEchoCanceler} noise=${cfg.micNoiseSuppressor} rtspPort=${cfg.mediaRtspPort} url=${effectiveUrl(cfg)}",
         )
         reconnectRoverHello()
 
@@ -194,8 +192,6 @@ class MicSettingsView(context: Context) : ScrollView(context) {
             return
         }
 
-        // ACTION_RESTART is handled inside the already-running microphone service. It does not
-        // destroy/recreate the foreground service; only the AudioRecord/Opus/RTSP pipeline changes.
         restartPublisher()
         refreshRuntime()
     }
@@ -241,6 +237,7 @@ class MicSettingsView(context: Context) : ScrollView(context) {
             appendLine("permission    : $permission")
             appendLine("source        : ${sources.firstOrNull { it.value == cfg.micAudioSource }?.label ?: cfg.micAudioSource}")
             appendLine("configured    : ${cfg.micSampleRate} Hz / ${cfg.micChannels} ch / ${cfg.micBitrate} bps / ${cfg.micGainDb} dB gain")
+            appendLine("RTSP port     : ${cfg.mediaRtspPort} (shared)")
             appendLine("effective URL : ${effectiveUrl(cfg)}")
             appendLine()
             append(MicRuntimeState.snapshot())
