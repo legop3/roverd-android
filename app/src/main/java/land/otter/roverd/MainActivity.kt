@@ -78,8 +78,9 @@ class MainActivity : Activity() {
     private var cameraExposureView: Spinner? = null
     private var cameraEncoderView: Spinner? = null
     private var cameraBitrateView: EditText? = null
-    private var cameraRtspPortView: EditText? = null
     private var cameraPublishUrlView: EditText? = null
+    private var headlightEnabledView: CheckBox? = null
+    private var headlightInitialOnView: CheckBox? = null
 
     private var cameraChoices: List<CameraChoice> = emptyList()
     private var cameraCatalog: CameraModeCatalog? = null
@@ -213,8 +214,8 @@ class MainActivity : Activity() {
 
         pageHost.removeAllViews()
         val view = when (page) {
-            Page.SYSTEM -> buildSystemPage()
-            Page.ROOMBA -> buildRoombaPage()
+            Page.SYSTEM -> SystemSettingsView(this)
+            Page.ROOMBA -> RoombaSettingsView(this)
             Page.CAMERA -> buildCameraPage()
             Page.MIC -> buildMicPage()
             Page.AUDIO -> buildAudioPage()
@@ -239,8 +240,9 @@ class MainActivity : Activity() {
         cameraExposureView = null
         cameraEncoderView = null
         cameraBitrateView = null
-        cameraRtspPortView = null
         cameraPublishUrlView = null
+        headlightEnabledView = null
+        headlightInitialOnView = null
         cameraChoices = emptyList()
         cameraCatalog = null
         cameraSizes = emptyList()
@@ -251,15 +253,15 @@ class MainActivity : Activity() {
         updatingCameraControls = false
     }
 
+    // Retained for internal diagnostics/backward compatibility. The visible SYSTEM page is
+    // SystemSettingsView, which exposes the complete rover identity/media config.
     private fun buildSystemPage(): View = scrollPage { root, _ ->
         pageTitle(root, "SYSTEM / ROVER SERVER")
         systemDiagnosticsView = diagnosticText(12f).also { root.addView(it) }
-
         section(root, "RUNTIME")
         addButton(root, "RESTART FULL ROVER RUNTIME") { sendServiceAction(RoverService.ACTION_RESTART) }
         addButton(root, "REQUEST BATTERY / DOZE EXEMPTION") { requestBatteryOptimizationExemption(userInitiated = true) }
         addButton(root, "COPY ALL DIAGNOSTICS + LOG") { copyAllDiagnostics() }
-
         section(root, "SETTINGS")
         val cfg = RoverSettings.load(this)
         nameView = edit(root, "Rover name").apply { setText(cfg.name) }
@@ -267,46 +269,36 @@ class MainActivity : Activity() {
         addButton(root, "SAVE SYSTEM SETTINGS + RESTART") { saveSystemSettings() }
     }
 
+    // Retained for internal diagnostics/backward compatibility. The visible ROOMBA page is
+    // RoombaSettingsView, which exposes USB selection, battery thresholds and private safety.
     private fun buildRoombaPage(): View = scrollPage { root, _ ->
         pageTitle(root, "ROOMBA / USB SERIAL / OI")
         roombaDiagnosticsView = diagnosticText(12f).also { root.addView(it) }
-
         section(root, "SERIAL / OI RECOVERY")
         addButton(root, "RECONNECT USB SERIAL") { sendServiceAction(RoverService.ACTION_RECONNECT_USB) }
         addButton(root, "RESTART SENSOR STREAM") { sendServiceAction(RoverService.ACTION_RESTART_SENSOR_STREAM) }
         addButton(root, "PULSE BRC NOW") { sendServiceAction(RoverService.ACTION_PULSE_BRC) }
-
         section(root, "ROOMBA SETTINGS")
         val cfg = RoverSettings.load(this)
         baudView = edit(root, "Serial baud").apply { setText(cfg.baud.toString()) }
         speedView = edit(root, "Max wheel speed (mm/s)").apply { setText(cfg.maxWheelSpeed.toString()) }
-
         autoSideBrushEnabledView = CheckBox(this).apply {
             text = "Automatic side brush while driving"
             isChecked = cfg.autoSideBrushEnabled
         }
         root.addView(autoSideBrushEnabledView)
-        autoSideBrushSpeedView = edit(root, "Automatic side brush PWM (-127..127)").apply {
-            setText(cfg.autoSideBrushSpeed.toString())
-        }
-
+        autoSideBrushSpeedView = edit(root, "Automatic side brush PWM (-127..127)").apply { setText(cfg.autoSideBrushSpeed.toString()) }
         root.addView(TextView(this).apply { text = "BRC control line" })
         brcLineView = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                BrcLine.entries.map { it.name },
-            )
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, BrcLine.entries.map { it.name })
             setSelection(BrcLine.entries.indexOf(cfg.brcLine).coerceAtLeast(0))
         }
         root.addView(brcLineView)
-
         brcActiveLowView = CheckBox(this).apply {
             text = "BRC active state is LOW / control-line false"
             isChecked = cfg.brcActiveLow
         }
         root.addView(brcActiveLowView)
-
         brcEveryView = edit(root, "BRC pulse interval (ms)").apply { setText(cfg.brcPulseEveryMs.toString()) }
         brcWidthView = edit(root, "BRC pulse width (ms)").apply { setText(cfg.brcPulseWidthMs.toString()) }
         addButton(root, "SAVE ROOMBA SETTINGS + RESTART") { saveRoombaSettings() }
@@ -351,7 +343,7 @@ class MainActivity : Activity() {
         cameraEncoderView?.setSelection(cameraEncoderNames.indexOf(cfg.cameraEncoderName).takeIf { it >= 0 } ?: 0)
 
         cameraBitrateView = edit(root, "H.264 bitrate (bits/sec)").apply { setText(cfg.cameraBitrate.toString()) }
-        cameraRtspPortView = edit(root, "MediaMTX RTSP port").apply { setText(cfg.cameraRtspPort.toString()) }
+        root.addView(diagnosticText(10f).apply { text = "Shared MediaMTX RTSP port: ${cfg.mediaRtspPort} (SYSTEM tab)" })
         cameraPublishUrlView = edit(root, "RTSP publish URL override (blank = derive from server host + rover name)").apply {
             setText(cfg.cameraPublishUrl)
         }
@@ -366,7 +358,21 @@ class MainActivity : Activity() {
 
         addButton(root, "REFRESH CAMERA / MODE LISTS") { refreshCameraList() }
         addButton(root, "REQUEST CAMERA PERMISSION") { requestCameraPermission() }
-        addButton(root, "SAVE CAMERA SETTINGS + APPLY") { saveCameraSettings() }
+
+        section(root, "PHONE FLASHLIGHT / ROVER HEADLIGHT")
+        headlightEnabledView = CheckBox(this).apply {
+            text = "Expose phone flashlight as rover headlight / night vision"
+            isChecked = cfg.headlightEnabled
+        }
+        root.addView(headlightEnabledView)
+        headlightInitialOnView = CheckBox(this).apply {
+            text = "Headlight initially ON when roverd starts"
+            isChecked = cfg.headlightInitialOn
+        }
+        root.addView(headlightInitialOnView)
+        root.addView(diagnosticText(10f).apply { text = HeadlightController.snapshot() })
+
+        addButton(root, "SAVE CAMERA / HEADLIGHT SETTINGS + APPLY") { saveCameraSettings() }
 
         section(root, "VIDEO ENCODER / STREAM")
         cameraRuntimeView = diagnosticText(11f).apply { text = cameraRuntimeSnapshot() }.also { root.addView(it) }
@@ -454,8 +460,6 @@ class MainActivity : Activity() {
 
     private fun refreshVisiblePage() {
         when (currentPage) {
-            Page.SYSTEM -> setTextIfChanged(systemDiagnosticsView, systemSnapshot())
-            Page.ROOMBA -> setTextIfChanged(roombaDiagnosticsView, roombaSnapshot())
             Page.CAMERA -> Unit
             Page.LOG -> refreshLog()
             else -> Unit
@@ -481,7 +485,10 @@ class MainActivity : Activity() {
             appendLine("device        : ${Build.MANUFACTURER} ${Build.MODEL}")
             appendLine("android       : ${Build.VERSION.RELEASE} / API ${Build.VERSION.SDK_INT}")
             appendLine("rover name    : ${cfg.name}")
+            appendLine("description   : ${cfg.description.ifBlank { "-" }}")
+            appendLine("color         : ${cfg.color.ifBlank { "-" }}")
             appendLine("server URL    : ${cfg.serverUrl}")
+            appendLine("MediaMTX RTSP : ${cfg.mediaRtspPort}")
             appendLine("WS connected  : ${RoverRuntimeState.serverConnected}")
             appendLine("CPU wake lock : ${RoverRuntimeState.wakeLockHeld}")
             appendLine("Wi-Fi lock    : ${RoverRuntimeState.wifiLockHeld}")
@@ -501,13 +508,22 @@ class MainActivity : Activity() {
         val chargeSourcesText = if (RoverRuntimeState.chargeSources < 0) "-" else "0x%02X".format(RoverRuntimeState.chargeSources)
         val chargingStateText = if (RoverRuntimeState.chargingState < 0) "-" else RoverRuntimeState.chargingState.toString()
         val cfg = RoverSettings.load(this)
+        val s = cfg.privateSafety
         return buildString {
             appendLine("USB connected : ${RoverRuntimeState.usbConnected}")
+            appendLine("USB selection : ${cfg.usbSerialPreference}")
             appendLine("USB device    : ${RoverRuntimeState.usbDevice.ifBlank { "-" }}")
             appendLine("serial        : ${cfg.baud} 8N1")
             appendLine("max wheel     : ${cfg.maxWheelSpeed} mm/s")
+            appendLine("battery cfg   : full=${cfg.batteryFull} warn=${cfg.batteryWarn} urgent=${cfg.batteryUrgent}")
             appendLine("auto side     : enabled=${cfg.autoSideBrushEnabled} speed=${cfg.autoSideBrushSpeed}")
             appendLine("BRC           : ${cfg.brcLine} activeLow=${cfg.brcActiveLow} every=${cfg.brcPulseEveryMs}ms width=${cfg.brcPulseWidthMs}ms")
+            appendLine("private       : ${cfg.privateEnabled}")
+            appendLine("private speed : ${s.speedLimitEnabled}/${s.speedLimitMaxWheelSpeed}")
+            appendLine("private OC    : ${s.hardOvercurrentEnabled}/${s.overcurrentStopMs}ms")
+            appendLine("private bump  : ${s.hardBumpEnabled}/${s.bumpBackoffSpeed}/${s.bumpBackoffMs}ms")
+            appendLine("private cliff : ${s.cliffEnabled}/${s.cliffBackoffSpeed}/${s.cliffBackoffMs}ms")
+            appendLine("private wall  : ${s.virtualWallEnabled}/${s.virtualWallBackoffSpeed}/${s.virtualWallBackoffMs}ms cd=${s.triggerCooldownMs}")
             appendLine("charge state  : $chargingStateText")
             appendLine("charge sources: $chargeSourcesText")
             appendLine("home base     : ${RoverRuntimeState.homeBaseDetected}")
@@ -539,6 +555,8 @@ class MainActivity : Activity() {
             appendLine("rotation      : $rotation")
             appendLine("AE comp raw   : ${cfg.cameraExposureCompensation}")
             appendLine("encoder pref  : ${cfg.cameraEncoderName}")
+            appendLine("MediaMTX RTSP : ${cfg.mediaRtspPort}")
+            appendLine("headlight cfg : enabled=${cfg.headlightEnabled} initialOn=${cfg.headlightInitialOn} current=${HeadlightController.isOn()}")
             appendLine("camera API    : ${if (Build.VERSION.SDK_INT >= 21) "Camera2 + GLES streaming" else "legacy diagnostics only"}")
             append("publish URL   : ${effectiveCameraPublishUrl(cfg)}")
         }
@@ -781,16 +799,23 @@ class MainActivity : Activity() {
             cameraRotation = selectedCameraRotation(old),
             cameraExposureCompensation = selectedCameraExposure(old),
             cameraEncoderName = selectedCameraEncoder(old),
-            cameraRtspPort = (cameraRtspPortView?.text?.toString()?.toIntOrNull() ?: old.cameraRtspPort).coerceIn(1, 65535),
             cameraPublishUrl = cameraPublishUrlView?.text?.toString()?.trim().orEmpty(),
+            headlightEnabled = headlightEnabledView?.isChecked ?: old.headlightEnabled,
+            headlightInitialOn = headlightInitialOnView?.isChecked ?: old.headlightInitialOn,
         )
         RoverSettings.save(this, cfg)
         RoverRuntimeState.log(
             "UI saved CAMERA settings enabled=${cfg.cameraEnabled} id=${cfg.cameraId} " +
                 "capture=${cfg.cameraWidth}x${cfg.cameraHeight} fps=${cfg.cameraFpsMin}-${cfg.cameraFpsMax} " +
                 "rotation=${cfg.cameraRotation} exposureComp=${cfg.cameraExposureCompensation} encoder=${cfg.cameraEncoderName} " +
-                "bitrate=${cfg.cameraBitrate} rtspPort=${cfg.cameraRtspPort} effectiveUrl=${effectiveCameraPublishUrl(cfg)}",
+                "bitrate=${cfg.cameraBitrate} rtspPort=${cfg.mediaRtspPort} headlight=${cfg.headlightEnabled}/${cfg.headlightInitialOn} " +
+                "effectiveUrl=${effectiveCameraPublishUrl(cfg)}",
         )
+
+        if (old.headlightEnabled != cfg.headlightEnabled || old.headlightInitialOn != cfg.headlightInitialOn) {
+            runCatching { HeadlightController.applyConfiguredState(cfg) }
+                .onFailure { RoverRuntimeState.log("HEADLIGHT applying saved config failed: ${it.stackTraceToString()}") }
+        }
 
         sendServiceAction(RoverService.ACTION_RECONNECT_SERVER)
 
@@ -827,6 +852,9 @@ class MainActivity : Activity() {
             appendLine(cameraSummarySnapshot())
             appendLine(cameraRuntimeSnapshot())
             appendLine(cameraInventory)
+            appendLine()
+            appendLine("=== HEADLIGHT ===")
+            appendLine(HeadlightController.snapshot())
             appendLine()
             appendLine("=== MIC ===")
             appendLine(MicRuntimeState.snapshot())
