@@ -10,6 +10,7 @@ object MicRuntimeState {
     @Volatile var sampleRate: Int = 0
     @Volatile var channels: Int = 0
     @Volatile var configuredBitrate: Int = 0
+    @Volatile var gainDb: Int = 0
     @Volatile var measuredBitrate: Long = 0
     @Volatile var amplitude: Float = 0f
     @Volatile var sentFrames: Long = 0
@@ -31,11 +32,12 @@ object MicRuntimeState {
         lastFrameAtMs = 0
     }
 
-    fun setConfig(url: String, rate: Int, channelCount: Int, bitrate: Int, encoderName: String = "") {
+    fun setConfig(url: String, rate: Int, channelCount: Int, bitrate: Int, gain: Int, encoderName: String = "") {
         publishUrl = url
         sampleRate = rate
         channels = channelCount
         configuredBitrate = bitrate
+        gainDb = gain
         encoder = encoderName
     }
 
@@ -72,6 +74,7 @@ object MicRuntimeState {
             appendLine("codec         : $codec")
             appendLine("encoder       : ${encoder.ifBlank { "auto / not reported" }}")
             appendLine("format        : ${sampleRate} Hz / ${channels} ch")
+            appendLine("gain          : ${gainDb} dB")
             appendLine("bitrate cfg   : $configuredBitrate bps")
             appendLine("bitrate live  : $measuredBitrate bps")
             appendLine("amplitude     : $amplitude")
