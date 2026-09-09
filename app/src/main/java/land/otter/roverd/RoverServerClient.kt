@@ -1,5 +1,8 @@
 package land.otter.roverd
 
+import android.content.Context
+import android.content.Intent
+import android.os.Build
 import android.util.Base64
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -16,6 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 
 class RoverServerClient(
+    context: Context,
     private val config: RoverConfig,
     private val roombaProvider: () -> UsbRoomba?,
     private val onStatus: (String) -> Unit,
@@ -24,8 +28,12 @@ class RoverServerClient(
     companion object {
         val DEFAULT_STREAM_PACKETS = byteArrayOf(100, 21, 34)
         private const val DISCONNECT_SEEK_SECONDS = 60L
+        private const val DISCONNECT_RECOVER_SECONDS = 360L
+        private const val HOST_STATS_INTERVAL_SECONDS = 1L
     }
 
+    private val appContext = context.applicationContext
+    private val hostStats = AndroidHostStats(appContext)
     private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val http = OkHttpClient.Builder()
         .pingInterval(10, TimeUnit.SECONDS)
@@ -37,7 +45,9 @@ class RoverServerClient(
     @Volatile private var connected = false
     private var reconnectSeconds = 1L
     private var lastSensorSentNs = 0L
+    private var hostStatsTask: ScheduledFuture<*>? = null
     private var disconnectSeekTask: ScheduledFuture<*>? = null
+    private var disconnectRecoverTask: ScheduledFuture<*>? = null
 
     private var lastAuxMain = 0
     private var lastAuxSide = 0
@@ -45,6 +55,14 @@ class RoverServerClient(
     private var autoSideBrushOn = false
 
     fun start() {
+        if (hostStatsTask == null) {
+            hostStatsTask = scheduler.scheduleAtFixedRate(
+                { sendHostStats() },
+                HOST_STATS_INTERVAL_SECONDS,
+                HOST_STATS_INTERVAL_SECONDS,
+                TimeUnit.SECONDS,
+            )
+        }
         connect()
     }
 
@@ -54,6 +72,21 @@ class RoverServerClient(
         RoverRuntimeState.log("WS connect url=${config.serverUrl}")
         val request = Request.Builder().url(config.serverUrl).build()
         socket = http.newWebSocket(request, Listener())
+    }
+
+    private fun sendHostStats() {
+        if (closed.get() || !connected) return
+        val ws = socket ?: return
+        runCatching {
+            val stats = hostStats.collect()
+            val msg = JSONObject()
+                .put("type", "hostStats")
+                .put("ts", System.currentTimeMillis())
+                .put("stats", stats)
+            if (!ws.send(msg.toString())) throw IllegalStateException("WebSocket rejected hostStats send")
+        }.onFailure {
+            RoverRuntimeState.log("HOST STATS collection/send failed: ${it.message}")
+        }
     }
 
     fun sendSensorFrame(frame: ByteArray) {
@@ -170,7 +203,7 @@ class RoverServerClient(
                 .put("urgent", config.batteryUrgent))
             .put("maxWheelSpeed", config.maxWheelSpeed)
             .put("media", JSONObject()
-                .put("manage", false)
+                .put("manage", true)
                 .put("video", video)
                 .put("audioCapture", audioCapture)
                 .put("audioPlayback", audioPlayback))
@@ -259,6 +292,7 @@ class RoverServerClient(
                     roomba.startSensorStream(DEFAULT_STREAM_PACKETS)
                 }
             }
+            msg.has("media") -> handleMediaCommand(msg.getJSONObject("media").optString("action"))
             msg.has("song") -> {
                 val p = msg.getJSONObject("song")
                 val slot = p.optInt("slot", 0).coerceIn(0, 4)
@@ -283,9 +317,58 @@ class RoverServerClient(
                 if (!config.headlightEnabled) throw IllegalStateException("headlight disabled")
                 val action = msg.getJSONObject("headlight").optString("action", "toggle")
                 HeadlightController.handleAction(action, config.cameraId)
+                sendEvent("headlight.state", mapOf("headlightOn" to HeadlightController.isOn()))
             }
             else -> throw UnsupportedOperationException("Unsupported command type: ${msg.optString("type", "unknown")}")
         }
+    }
+
+    private fun handleMediaCommand(rawAction: String) {
+        val action = rawAction.trim().lowercase()
+        when (action) {
+            "start" -> {
+                signalConfiguredMedia(CameraPublisherService.ACTION_START, MicPublisherService.ACTION_START, AudioPlaybackService.ACTION_START)
+                RoverRuntimeState.log("MEDIA remote start applied to configured Android media services")
+            }
+            "stop" -> {
+                if (config.cameraEnabled) appContext.stopService(Intent(appContext, CameraPublisherService::class.java))
+                if (config.micEnabled) appContext.stopService(Intent(appContext, MicPublisherService::class.java))
+                if (config.audioPlaybackEnabled) appContext.stopService(Intent(appContext, AudioPlaybackService::class.java))
+                RoverRuntimeState.log("MEDIA remote stop applied to configured Android media services")
+            }
+            "restart", "reload" -> {
+                signalConfiguredMedia(CameraPublisherService.ACTION_RESTART, MicPublisherService.ACTION_RESTART, AudioPlaybackService.ACTION_RESTART)
+                RoverRuntimeState.log("MEDIA remote $action applied as Android media pipeline restart")
+            }
+            "status" -> {
+                sendEvent(
+                    "media.status",
+                    mapOf(
+                        "cameraRunning" to RoverRuntimeState.cameraRunning,
+                        "micRunning" to MicRuntimeState.running,
+                        "audioPlaybackRunning" to AudioPlaybackRuntimeState.running,
+                    ),
+                )
+                RoverRuntimeState.log("MEDIA remote status requested")
+            }
+            else -> throw IllegalArgumentException("unknown media action: $rawAction")
+        }
+    }
+
+    private fun signalConfiguredMedia(cameraAction: String, micAction: String, audioAction: String) {
+        if (config.cameraEnabled && Build.VERSION.SDK_INT >= 21) {
+            startServiceCompat(Intent(appContext, CameraPublisherService::class.java).setAction(cameraAction))
+        }
+        if (config.micEnabled) {
+            startServiceCompat(Intent(appContext, MicPublisherService::class.java).setAction(micAction))
+        }
+        if (config.audioPlaybackEnabled) {
+            startServiceCompat(Intent(appContext, AudioPlaybackService::class.java).setAction(audioAction))
+        }
+    }
+
+    private fun startServiceCompat(intent: Intent) {
+        if (Build.VERSION.SDK_INT >= 26) appContext.startForegroundService(intent) else appContext.startService(intent)
     }
 
     private fun applyAutoSideBrush(roomba: UsbRoomba, left: Int, right: Int) {
@@ -341,35 +424,53 @@ class RoverServerClient(
     }
 
     @Synchronized
-    private fun scheduleDisconnectSeek() {
-        if (closed.get() || connected || disconnectSeekTask != null) return
-        RoverRuntimeState.log("WS disconnect failsafe armed: SeekDock in ${DISCONNECT_SEEK_SECONDS}s")
-        disconnectSeekTask = scheduler.schedule(
-            {
-                synchronized(this) { disconnectSeekTask = null }
-                if (closed.get() || connected) return@schedule
-                val roomba = roombaProvider()
-                if (roomba == null || !roomba.isConnected()) {
-                    RoverRuntimeState.log("WS disconnect failsafe could not SeekDock: USB serial not connected")
-                    return@schedule
-                }
-                runCatching { roomba.seekDock() }
-                    .onSuccess {
-                        RoverRuntimeState.log("WS disconnect failsafe SeekDock issued after ${DISCONNECT_SEEK_SECONDS}s")
+    private fun armDisconnectFailsafes() {
+        if (closed.get() || connected) return
+        if (disconnectSeekTask == null) {
+            RoverRuntimeState.log("WS disconnect failsafe armed: SeekDock in ${DISCONNECT_SEEK_SECONDS}s")
+            disconnectSeekTask = scheduler.schedule(
+                {
+                    synchronized(this) { disconnectSeekTask = null }
+                    if (closed.get() || connected) return@schedule
+                    val roomba = roombaProvider()
+                    if (roomba == null || !roomba.isConnected()) {
+                        RoverRuntimeState.log("WS disconnect failsafe could not SeekDock: USB serial not connected")
+                    } else {
+                        runCatching { roomba.seekDock() }
+                            .onSuccess { RoverRuntimeState.log("WS disconnect failsafe SeekDock issued after ${DISCONNECT_SEEK_SECONDS}s") }
+                            .onFailure { RoverRuntimeState.log("WS disconnect failsafe SeekDock failed: ${it.stackTraceToString()}") }
                     }
-                    .onFailure {
-                        RoverRuntimeState.log("WS disconnect failsafe SeekDock failed: ${it.stackTraceToString()}")
+                },
+                DISCONNECT_SEEK_SECONDS,
+                TimeUnit.SECONDS,
+            )
+        }
+
+        if (disconnectRecoverTask == null) {
+            RoverRuntimeState.log("WS disconnect failsafe armed: full Android rover recovery in ${DISCONNECT_RECOVER_SECONDS}s")
+            disconnectRecoverTask = scheduler.schedule(
+                {
+                    synchronized(this) { disconnectRecoverTask = null }
+                    if (closed.get() || connected) return@schedule
+                    RoverRuntimeState.log("WS disconnect failsafe triggering full Android rover recovery after ${DISCONNECT_RECOVER_SECONDS}s")
+                    runCatching {
+                        startServiceCompat(Intent(appContext, RoverService::class.java).setAction(RoverService.ACTION_RECOVER_ALL))
+                    }.onFailure {
+                        RoverRuntimeState.log("WS disconnect full recovery trigger failed: ${it.stackTraceToString()}")
                     }
-            },
-            DISCONNECT_SEEK_SECONDS,
-            TimeUnit.SECONDS,
-        )
+                },
+                DISCONNECT_RECOVER_SECONDS,
+                TimeUnit.SECONDS,
+            )
+        }
     }
 
     @Synchronized
-    private fun cancelDisconnectSeek() {
+    private fun cancelDisconnectFailsafes() {
         disconnectSeekTask?.cancel(false)
         disconnectSeekTask = null
+        disconnectRecoverTask?.cancel(false)
+        disconnectRecoverTask = null
     }
 
     private inner class Listener : WebSocketListener() {
@@ -377,7 +478,7 @@ class RoverServerClient(
             socket = webSocket
             connected = true
             reconnectSeconds = 1
-            cancelDisconnectSeek()
+            cancelDisconnectFailsafes()
             RoverRuntimeState.setServerState(true)
             onStatus("Server connected")
             sendHello(webSocket)
@@ -388,6 +489,7 @@ class RoverServerClient(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            if (socket !== webSocket) return
             handleCommand(webSocket, text)
         }
 
@@ -397,21 +499,29 @@ class RoverServerClient(
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            if (socket === webSocket) socket = null
+            if (socket !== webSocket) {
+                RoverRuntimeState.log("WS ignoring close from retired socket code=$code reason=$reason")
+                return
+            }
+            socket = null
             connected = false
             RoverRuntimeState.setServerState(false)
             onStatus("Server disconnected: $code $reason")
-            scheduleDisconnectSeek()
+            armDisconnectFailsafes()
             scheduleReconnect()
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            if (socket === webSocket) socket = null
+            if (socket !== webSocket) {
+                RoverRuntimeState.log("WS ignoring failure from retired socket: ${t.message}")
+                return
+            }
+            socket = null
             connected = false
             RoverRuntimeState.setServerState(false)
             RoverRuntimeState.log("WS failure response=${response?.code()} exception=${t.stackTraceToString()}")
             onStatus("Server connection failed: ${t.message}")
-            scheduleDisconnectSeek()
+            armDisconnectFailsafes()
             scheduleReconnect()
         }
     }
@@ -419,7 +529,9 @@ class RoverServerClient(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         connected = false
-        cancelDisconnectSeek()
+        hostStatsTask?.cancel(false)
+        hostStatsTask = null
+        cancelDisconnectFailsafes()
         RoverRuntimeState.setServerState(false)
         socket?.close(1000, "service stopping")
         socket = null
