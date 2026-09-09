@@ -25,6 +25,15 @@ data class RoverConfig(
     val cameraEncoderName: String,
     val cameraRtspPort: Int,
     val cameraPublishUrl: String,
+    val micEnabled: Boolean,
+    val micAudioSource: Int,
+    val micSampleRate: Int,
+    val micChannels: Int,
+    val micBitrate: Int,
+    val micEchoCanceler: Boolean,
+    val micNoiseSuppressor: Boolean,
+    val micRtspPort: Int,
+    val micPublishUrl: String,
 ) {
     val cameraFps: Int get() = cameraFpsMax
 }
@@ -62,6 +71,15 @@ object RoverSettings {
             cameraEncoderName = p.getString("cameraEncoderName", "AUTO") ?: "AUTO",
             cameraRtspPort = p.getInt("cameraRtspPort", 8554),
             cameraPublishUrl = p.getString("cameraPublishUrl", "") ?: "",
+            micEnabled = p.getBoolean("micEnabled", false),
+            micAudioSource = p.getInt("micAudioSource", 0),
+            micSampleRate = p.getInt("micSampleRate", 48_000),
+            micChannels = p.getInt("micChannels", 1).coerceIn(1, 2),
+            micBitrate = p.getInt("micBitrate", 128_000),
+            micEchoCanceler = p.getBoolean("micEchoCanceler", false),
+            micNoiseSuppressor = p.getBoolean("micNoiseSuppressor", false),
+            micRtspPort = p.getInt("micRtspPort", 8554),
+            micPublishUrl = p.getString("micPublishUrl", "") ?: "",
         )
     }
 
@@ -90,6 +108,15 @@ object RoverSettings {
             .putString("cameraEncoderName", config.cameraEncoderName)
             .putInt("cameraRtspPort", config.cameraRtspPort)
             .putString("cameraPublishUrl", config.cameraPublishUrl)
+            .putBoolean("micEnabled", config.micEnabled)
+            .putInt("micAudioSource", config.micAudioSource)
+            .putInt("micSampleRate", config.micSampleRate)
+            .putInt("micChannels", config.micChannels)
+            .putInt("micBitrate", config.micBitrate)
+            .putBoolean("micEchoCanceler", config.micEchoCanceler)
+            .putBoolean("micNoiseSuppressor", config.micNoiseSuppressor)
+            .putInt("micRtspPort", config.micRtspPort)
+            .putString("micPublishUrl", config.micPublishUrl)
             .apply()
     }
 }
