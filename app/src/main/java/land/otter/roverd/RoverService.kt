@@ -17,6 +17,7 @@ class RoverService : Service() {
         private const val NOTIFICATION_ID = 1
 
         const val ACTION_RESTART = "restart"
+        const val ACTION_RECONNECT_SERVER = "reconnect_server"
         const val ACTION_RECONNECT_USB = "reconnect_usb"
         const val ACTION_RESTART_SENSOR_STREAM = "restart_sensor_stream"
         const val ACTION_PULSE_BRC = "pulse_brc"
@@ -46,11 +47,7 @@ class RoverService : Service() {
                 "brcWidthMs=${config.brcPulseWidthMs}",
         )
 
-        server = RoverServerClient(
-            config = config,
-            roombaProvider = { roomba },
-            onStatus = ::status,
-        ).also { it.start() }
+        startServer(config)
 
         roomba = UsbRoomba(
             context = this,
@@ -61,6 +58,15 @@ class RoverService : Service() {
                 RoverRuntimeState.log("USB optional subsystem connected=$connected")
             },
         ).also { it.connect() }
+    }
+
+    private fun startServer(config: RoverConfig = RoverSettings.load(this)) {
+        stopServer()
+        server = RoverServerClient(
+            config = config,
+            roombaProvider = { roomba },
+            onStatus = ::status,
+        ).also { it.start() }
     }
 
     @Suppress("DEPRECATION")
@@ -171,6 +177,10 @@ class RoverService : Service() {
             ACTION_RESTART -> {
                 RoverRuntimeState.log("MANUAL full rover runtime restart")
                 startRuntime()
+            }
+            ACTION_RECONNECT_SERVER -> {
+                RoverRuntimeState.log("MANUAL rover WebSocket reconnect")
+                startServer()
             }
             ACTION_RECONNECT_USB -> {
                 status("Manual USB reconnect requested")
