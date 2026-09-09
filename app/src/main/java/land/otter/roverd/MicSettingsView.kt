@@ -35,6 +35,7 @@ class MicSettingsView(context: Context) : ScrollView(context) {
     private val rateView = Spinner(context)
     private val channelView = Spinner(context)
     private val bitrateView = EditText(context)
+    private val gainView = EditText(context)
     private val echoView = CheckBox(context)
     private val noiseView = CheckBox(context)
     private val rtspPortView = EditText(context)
@@ -93,6 +94,13 @@ class MicSettingsView(context: Context) : ScrollView(context) {
         bitrateView.setText(cfg.micBitrate.toString())
         root.addView(bitrateView)
 
+        label(root, "Microphone gain before Opus (-20..30 dB)")
+        gainView.setText(cfg.micGainDb.toString())
+        root.addView(gainView)
+        root.addView(diagnostic(10f).apply {
+            text = "Gain is applied to raw PCM before encoding. 0 dB = unchanged; +12 dB is the Android default here; the Pi publisher uses a +20 dB microphone boost."
+        })
+
         echoView.text = "Enable Android acoustic echo canceler"
         echoView.isChecked = cfg.micEchoCanceler
         root.addView(echoView)
@@ -110,7 +118,7 @@ class MicSettingsView(context: Context) : ScrollView(context) {
         root.addView(publishUrlView)
 
         root.addView(diagnostic(10f).apply {
-            text = "Audio path    : Android AudioRecord -> MediaCodec Opus -> RTSP/RTP over TCP -> MediaMTX\n" +
+            text = "Audio path    : Android AudioRecord -> PCM gain -> MediaCodec Opus -> RTSP/RTP over TCP -> MediaMTX\n" +
                 "effective URL : ${effectiveUrl(cfg)}\n" +
                 "Pi contract    : separate <rover>-audio stream; camera and mic are independent"
         })
@@ -160,6 +168,7 @@ class MicSettingsView(context: Context) : ScrollView(context) {
             micSampleRate = rate,
             micChannels = channels,
             micBitrate = (bitrateView.text.toString().toIntOrNull() ?: old.micBitrate).coerceIn(16_000, 510_000),
+            micGainDb = (gainView.text.toString().toIntOrNull() ?: old.micGainDb).coerceIn(-20, 30),
             micEchoCanceler = echoView.isChecked,
             micNoiseSuppressor = noiseView.isChecked,
             micRtspPort = (rtspPortView.text.toString().toIntOrNull() ?: old.micRtspPort).coerceIn(1, 65_535),
@@ -168,7 +177,7 @@ class MicSettingsView(context: Context) : ScrollView(context) {
         RoverSettings.save(context, cfg)
         RoverRuntimeState.log(
             "UI saved MIC settings enabled=${cfg.micEnabled} source=${cfg.micAudioSource} " +
-                "rate=${cfg.micSampleRate} channels=${cfg.micChannels} bitrate=${cfg.micBitrate} " +
+                "rate=${cfg.micSampleRate} channels=${cfg.micChannels} bitrate=${cfg.micBitrate} gain=${cfg.micGainDb}dB " +
                 "echo=${cfg.micEchoCanceler} noise=${cfg.micNoiseSuppressor} url=${effectiveUrl(cfg)}",
         )
         reconnectRoverHello()
@@ -184,7 +193,11 @@ class MicSettingsView(context: Context) : ScrollView(context) {
             refreshRuntime()
             return
         }
+
+        // ACTION_RESTART is handled inside the already-running microphone service. It does not
+        // destroy/recreate the foreground service; only the AudioRecord/Opus/RTSP pipeline changes.
         restartPublisher()
+        refreshRuntime()
     }
 
     private fun hasMicPermission(): Boolean =
@@ -203,7 +216,7 @@ class MicSettingsView(context: Context) : ScrollView(context) {
     }
 
     private fun restartPublisher() {
-        RoverRuntimeState.log("UI restarting microphone publisher foreground service")
+        RoverRuntimeState.log("UI requesting in-service microphone pipeline restart")
         startServiceCompat(Intent(context, MicPublisherService::class.java).setAction(MicPublisherService.ACTION_RESTART))
     }
 
@@ -227,7 +240,7 @@ class MicSettingsView(context: Context) : ScrollView(context) {
             appendLine("enabled       : ${cfg.micEnabled}")
             appendLine("permission    : $permission")
             appendLine("source        : ${sources.firstOrNull { it.value == cfg.micAudioSource }?.label ?: cfg.micAudioSource}")
-            appendLine("configured    : ${cfg.micSampleRate} Hz / ${cfg.micChannels} ch / ${cfg.micBitrate} bps")
+            appendLine("configured    : ${cfg.micSampleRate} Hz / ${cfg.micChannels} ch / ${cfg.micBitrate} bps / ${cfg.micGainDb} dB gain")
             appendLine("effective URL : ${effectiveUrl(cfg)}")
             appendLine()
             append(MicRuntimeState.snapshot())
