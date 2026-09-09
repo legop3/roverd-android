@@ -49,6 +49,7 @@ class MainActivity : Activity() {
     private var systemDiagnosticsView: TextView? = null
     private var roombaDiagnosticsView: TextView? = null
     private var cameraSummaryView: TextView? = null
+    private var cameraRuntimeView: TextView? = null
     private var cameraInventoryView: TextView? = null
     private var logView: TextView? = null
 
@@ -62,8 +63,15 @@ class MainActivity : Activity() {
     private var brcEveryView: EditText? = null
     private var brcWidthView: EditText? = null
 
+    private var cameraEnabledView: CheckBox? = null
     private var cameraIdView: Spinner? = null
     private var cameraIds: List<String> = emptyList()
+    private var cameraWidthView: EditText? = null
+    private var cameraHeightView: EditText? = null
+    private var cameraFpsView: EditText? = null
+    private var cameraBitrateView: EditText? = null
+    private var cameraRtspPortView: EditText? = null
+    private var cameraPublishUrlView: EditText? = null
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private val refreshRunnable = object : Runnable {
@@ -92,6 +100,7 @@ class MainActivity : Activity() {
         showPage(Page.SYSTEM)
         requestNotificationPermission()
         startRoverService()
+        startConfiguredCameraIfPossible()
         requestBatteryOptimizationExemption(userInitiated = false)
     }
 
@@ -175,6 +184,7 @@ class MainActivity : Activity() {
         systemDiagnosticsView = null
         roombaDiagnosticsView = null
         cameraSummaryView = null
+        cameraRuntimeView = null
         cameraInventoryView = null
         logView = null
         nameView = null
@@ -185,8 +195,15 @@ class MainActivity : Activity() {
         brcActiveLowView = null
         brcEveryView = null
         brcWidthView = null
+        cameraEnabledView = null
         cameraIdView = null
         cameraIds = emptyList()
+        cameraWidthView = null
+        cameraHeightView = null
+        cameraFpsView = null
+        cameraBitrateView = null
+        cameraRtspPortView = null
+        cameraPublishUrlView = null
 
         pageHost.removeAllViews()
         val view = when (page) {
@@ -288,6 +305,12 @@ class MainActivity : Activity() {
         section(root, "CAMERA SETTINGS")
         val cfg = RoverSettings.load(this)
 
+        cameraEnabledView = CheckBox(this).apply {
+            text = "Enable camera H.264 -> MediaMTX publishing"
+            isChecked = cfg.cameraEnabled
+        }
+        root.addView(cameraEnabledView)
+
         root.addView(TextView(this).apply { text = "Selected raw Android camera ID" })
         cameraIds = runCatching { CameraDiagnostics.cameraIds(this) }
             .getOrElse {
@@ -311,32 +334,46 @@ class MainActivity : Activity() {
         root.addView(cameraIdView)
 
         root.addView(TextView(this).apply {
-            text = "Camera IDs are kept raw. No front/back abstraction is used."
+            text = "Camera IDs stay raw; no front/back abstraction. Streaming currently uses Camera2 on API 21+."
             typeface = Typeface.MONOSPACE
             textSize = 11f
         })
-        addButton(root, "REFRESH CAMERA LIST") {
-            refreshCameraList()
+
+        cameraWidthView = edit(root, "Requested width").apply { setText(cfg.cameraWidth.toString()) }
+        cameraHeightView = edit(root, "Requested height").apply { setText(cfg.cameraHeight.toString()) }
+        cameraFpsView = edit(root, "Requested FPS").apply { setText(cfg.cameraFps.toString()) }
+        cameraBitrateView = edit(root, "H.264 bitrate (bits/sec)").apply { setText(cfg.cameraBitrate.toString()) }
+        cameraRtspPortView = edit(root, "MediaMTX RTSP port").apply { setText(cfg.cameraRtspPort.toString()) }
+        cameraPublishUrlView = edit(root, "RTSP publish URL override (blank = derive from server host + rover name)").apply {
+            setText(cfg.cameraPublishUrl)
         }
-        addButton(root, "SAVE CAMERA SETTINGS") {
-            saveCameraSettings()
+        root.addView(diagnosticText(10f).apply {
+            text = "effective URL : ${effectiveCameraPublishUrl(cfg)}\ntransport     : RTSP/RTP over TCP (same as Pi rover publisher)"
+        })
+
+        addButton(root, "REFRESH CAMERA LIST") { refreshCameraList() }
+        addButton(root, "REQUEST CAMERA PERMISSION") { requestCameraPermission() }
+        addButton(root, "SAVE CAMERA SETTINGS + APPLY") { saveCameraSettings() }
+
+        section(root, "VIDEO ENCODER / STREAM")
+        cameraRuntimeView = diagnosticText(11f).apply {
+            text = cameraRuntimeSnapshot()
+        }.also { root.addView(it) }
+        addButton(root, "REFRESH STREAM STATUS") { refreshCameraRuntime() }
+        addButton(root, "START / RESTART CAMERA STREAM") {
+            saveCameraSettings(startEvenIfUnchecked = true)
         }
-        addButton(root, "REQUEST CAMERA PERMISSION") {
-            requestCameraPermission()
-        }
-        addButton(root, "REFRESH RAW CAMERA INVENTORY") {
-            refreshCameraInventory()
+        addButton(root, "STOP CAMERA STREAM") {
+            stopCameraPublisher()
+            RoverRuntimeState.setCameraPipelineState(running = false, state = "Stopped from UI", error = "")
+            refreshCameraRuntime()
         }
 
         section(root, "RAW CAMERA INVENTORY / CAPABILITIES")
+        addButton(root, "REFRESH RAW CAMERA INVENTORY") { refreshCameraInventory() }
         cameraInventoryView = diagnosticText(10f).apply {
-            text = "Not read yet. Press REFRESH RAW CAMERA INVENTORY.\nCamera hardware is not probed during app startup."
+            text = "Not read yet. Press REFRESH RAW CAMERA INVENTORY.\nCamera hardware is not opened by this inventory button."
         }.also { root.addView(it) }
-
-        section(root, "VIDEO ENCODER / STREAM")
-        root.addView(diagnosticText(11f).apply {
-            text = "NOT IMPLEMENTED YET\nThis section will own H.264 encoder selection, resolution, FPS, bitrate, MediaMTX publishing state, frame counters, reconnects, and encoder errors."
-        })
     }
 
     private fun buildMicPage(): View = scrollPage { root, _ ->
@@ -355,12 +392,8 @@ class MainActivity : Activity() {
 
     private fun buildLogPage(): View = scrollPage { root, pad ->
         pageTitle(root, "LOG / CRASH OUTPUT")
-        addButton(root, "COPY ALL DIAGNOSTICS + LOG") {
-            copyAllDiagnostics()
-        }
-        addButton(root, "CLEAR LOG") {
-            RoverRuntimeState.clearLog()
-        }
+        addButton(root, "COPY ALL DIAGNOSTICS + LOG") { copyAllDiagnostics() }
+        addButton(root, "CLEAR LOG") { RoverRuntimeState.clearLog() }
         logView = diagnosticText(10f).apply {
             setPadding(0, pad / 2, 0, pad * 2)
         }.also { root.addView(it) }
@@ -370,9 +403,7 @@ class MainActivity : Activity() {
     private fun scrollPage(builder: (LinearLayout, Int) -> Unit): View {
         val density = resources.displayMetrics.density
         val pad = (12 * density).toInt()
-        val scroll = ScrollView(this).apply {
-            isFillViewport = true
-        }
+        val scroll = ScrollView(this).apply { isFillViewport = true }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
@@ -432,17 +463,11 @@ class MainActivity : Activity() {
 
     private fun systemSnapshot(): String {
         val now = System.currentTimeMillis()
-        val commandAge = if (RoverRuntimeState.lastCommandAtMs == 0L) {
-            "never"
-        } else {
-            "${now - RoverRuntimeState.lastCommandAtMs} ms ago"
-        }
+        val commandAge = if (RoverRuntimeState.lastCommandAtMs == 0L) "never" else "${now - RoverRuntimeState.lastCommandAtMs} ms ago"
         val power = getSystemService(Context.POWER_SERVICE) as PowerManager
         val batteryOptimization = if (Build.VERSION.SDK_INT >= 23) {
             if (power.isIgnoringBatteryOptimizations(packageName)) "EXEMPT" else "ACTIVE"
-        } else {
-            "n/a (< API 23)"
-        }
+        } else "n/a (< API 23)"
         val powerSaver = if (Build.VERSION.SDK_INT >= 21) power.isPowerSaveMode.toString() else "n/a"
         val deviceIdle = if (Build.VERSION.SDK_INT >= 23) power.isDeviceIdleMode.toString() else "n/a"
         val cfg = RoverSettings.load(this)
@@ -466,13 +491,8 @@ class MainActivity : Activity() {
 
     private fun roombaSnapshot(): String {
         val now = System.currentTimeMillis()
-        val sensorAge = if (RoverRuntimeState.lastSensorAtMs == 0L) {
-            "never"
-        } else {
-            "${now - RoverRuntimeState.lastSensorAtMs} ms ago"
-        }
+        val sensorAge = if (RoverRuntimeState.lastSensorAtMs == 0L) "never" else "${now - RoverRuntimeState.lastSensorAtMs} ms ago"
         val cfg = RoverSettings.load(this)
-
         return buildString {
             appendLine("USB connected : ${RoverRuntimeState.usbConnected}")
             appendLine("USB device    : ${RoverRuntimeState.usbDevice.ifBlank { "-" }}")
@@ -492,15 +512,42 @@ class MainActivity : Activity() {
             "install-time permission"
         } else if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             "GRANTED"
-        } else {
-            "NOT GRANTED"
-        }
+        } else "NOT GRANTED"
         return buildString {
+            appendLine("enabled       : ${cfg.cameraEnabled}")
             appendLine("selected ID   : ${cfg.cameraId}")
             appendLine("permission    : $permission")
-            append("camera API    : ${if (Build.VERSION.SDK_INT >= 21) "Camera2" else "legacy Camera"}")
+            appendLine("camera API    : ${if (Build.VERSION.SDK_INT >= 21) "Camera2 streaming" else "legacy diagnostics only"}")
+            append("publish URL   : ${effectiveCameraPublishUrl(cfg)}")
         }
     }
+
+    private fun cameraRuntimeSnapshot(): String {
+        val now = System.currentTimeMillis()
+        fun age(value: Long): String = if (value == 0L) "never" else "${now - value} ms ago"
+        return buildString {
+            appendLine("pipeline      : ${RoverRuntimeState.cameraState}")
+            appendLine("running       : ${RoverRuntimeState.cameraRunning}")
+            appendLine("camera ID     : ${RoverRuntimeState.cameraId.ifBlank { "-" }}")
+            appendLine("encoder       : ${RoverRuntimeState.cameraEncoderName.ifBlank { "-" }}")
+            appendLine("actual format : ${RoverRuntimeState.cameraWidth}x${RoverRuntimeState.cameraHeight} @ ${RoverRuntimeState.cameraFps} fps")
+            appendLine("bitrate cfg   : ${RoverRuntimeState.cameraBitrate} bps")
+            appendLine("RTSP state    : ${RoverRuntimeState.cameraPublisherState}")
+            appendLine("RTSP connected: ${RoverRuntimeState.cameraPublisherConnected}")
+            appendLine("encoded       : ${RoverRuntimeState.cameraEncodedFrames} frames / ${RoverRuntimeState.cameraEncodedBytes} bytes")
+            appendLine("published     : ${RoverRuntimeState.cameraPublishedFrames} frames / ${RoverRuntimeState.cameraPublishedBytes} bytes")
+            appendLine("last encoded  : ${age(RoverRuntimeState.lastCameraEncodedAtMs)}")
+            appendLine("last published: ${age(RoverRuntimeState.lastCameraPublishedAtMs)}")
+            appendLine("last keyframe : ${age(RoverRuntimeState.lastCameraKeyFrameAtMs)}")
+            appendLine("dropped queue : ${RoverRuntimeState.cameraDroppedFrames}")
+            appendLine("RTSP reconnect: ${RoverRuntimeState.cameraReconnects}")
+            appendLine("publish URL   : ${RoverRuntimeState.cameraPublishUrl.ifBlank { effectiveCameraPublishUrl(RoverSettings.load(this@MainActivity)) }}")
+            append("last error    : ${RoverRuntimeState.cameraLastError.ifBlank { "-" }}")
+        }
+    }
+
+    private fun effectiveCameraPublishUrl(cfg: RoverConfig): String =
+        runCatching { MediaUrl.videoPublishUrl(cfg) }.getOrElse { "ERROR: ${it.message}" }
 
     private fun refreshCameraList() {
         if (currentPage != Page.CAMERA) return
@@ -515,11 +562,7 @@ class MainActivity : Activity() {
             .toMutableList()
         if (current !in ids) ids.add(0, current)
         cameraIds = ids.distinct()
-        spinner.adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_dropdown_item,
-            cameraIds,
-        )
+        spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, cameraIds)
         spinner.setSelection(cameraIds.indexOf(current).coerceAtLeast(0))
         RoverRuntimeState.log("CAMERA list refreshed ids=${cameraIds.joinToString(",")}")
     }
@@ -548,6 +591,10 @@ class MainActivity : Activity() {
 
     private fun refreshCameraSummary() {
         setTextIfChanged(cameraSummaryView, cameraSummarySnapshot())
+    }
+
+    private fun refreshCameraRuntime() {
+        setTextIfChanged(cameraRuntimeView, cameraRuntimeSnapshot())
     }
 
     private fun refreshLog() {
@@ -583,14 +630,46 @@ class MainActivity : Activity() {
         refreshVisiblePage()
     }
 
-    private fun saveCameraSettings() {
+    private fun saveCameraSettings(startEvenIfUnchecked: Boolean = false) {
         val old = RoverSettings.load(this)
+        val enabled = if (startEvenIfUnchecked) true else cameraEnabledView?.isChecked ?: old.cameraEnabled
+        if (startEvenIfUnchecked) cameraEnabledView?.isChecked = true
         val cfg = old.copy(
             cameraId = selectedCameraId().ifBlank { old.cameraId },
+            cameraEnabled = enabled,
+            cameraWidth = (cameraWidthView?.text?.toString()?.toIntOrNull() ?: old.cameraWidth).coerceIn(16, 8192),
+            cameraHeight = (cameraHeightView?.text?.toString()?.toIntOrNull() ?: old.cameraHeight).coerceIn(16, 8192),
+            cameraFps = (cameraFpsView?.text?.toString()?.toIntOrNull() ?: old.cameraFps).coerceIn(1, 120),
+            cameraBitrate = (cameraBitrateView?.text?.toString()?.toIntOrNull() ?: old.cameraBitrate).coerceIn(64_000, 100_000_000),
+            cameraRtspPort = (cameraRtspPortView?.text?.toString()?.toIntOrNull() ?: old.cameraRtspPort).coerceIn(1, 65535),
+            cameraPublishUrl = cameraPublishUrlView?.text?.toString()?.trim().orEmpty(),
         )
         RoverSettings.save(this, cfg)
-        RoverRuntimeState.log("UI saved CAMERA settings cameraId=${cfg.cameraId}")
+        RoverRuntimeState.log(
+            "UI saved CAMERA settings enabled=${cfg.cameraEnabled} id=${cfg.cameraId} ${cfg.cameraWidth}x${cfg.cameraHeight}@${cfg.cameraFps} " +
+                "bitrate=${cfg.cameraBitrate} rtspPort=${cfg.cameraRtspPort} effectiveUrl=${effectiveCameraPublishUrl(cfg)}",
+        )
+
+        // The rover hello contains media.video metadata, so restart only the rover WebSocket runtime to republish it.
+        sendServiceAction(RoverService.ACTION_RESTART)
+
+        if (cfg.cameraEnabled) {
+            if (Build.VERSION.SDK_INT < 21) {
+                RoverRuntimeState.setCameraPipelineState(
+                    running = false,
+                    state = "Unsupported Android version",
+                    error = "Camera streaming currently requires API 21+",
+                )
+            } else if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                requestCameraPermission()
+            } else {
+                startCameraPublisher()
+            }
+        } else {
+            stopCameraPublisher()
+        }
         refreshCameraSummary()
+        refreshCameraRuntime()
     }
 
     private fun copyAllDiagnostics() {
@@ -605,6 +684,7 @@ class MainActivity : Activity() {
             appendLine()
             appendLine("=== CAMERA ===")
             appendLine(cameraSummarySnapshot())
+            appendLine(cameraRuntimeSnapshot())
             appendLine(cameraInventory)
             appendLine()
             appendLine("=== LOG ===")
@@ -620,6 +700,24 @@ class MainActivity : Activity() {
 
     private fun sendServiceAction(action: String) {
         startServiceCompat(Intent(this, RoverService::class.java).setAction(action))
+    }
+
+    private fun startCameraPublisher() {
+        if (Build.VERSION.SDK_INT < 21) return
+        RoverRuntimeState.log("UI starting/restarting camera publisher foreground service")
+        startServiceCompat(Intent(this, CameraPublisherService::class.java).setAction(CameraPublisherService.ACTION_RESTART))
+    }
+
+    private fun stopCameraPublisher() {
+        RoverRuntimeState.log("UI stopping camera publisher service")
+        stopService(Intent(this, CameraPublisherService::class.java))
+    }
+
+    private fun startConfiguredCameraIfPossible() {
+        val cfg = RoverSettings.load(this)
+        if (!cfg.cameraEnabled || Build.VERSION.SDK_INT < 21) return
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
+        startCameraPublisher()
     }
 
     private fun startServiceCompat(intent: Intent) {
@@ -644,6 +742,7 @@ class MainActivity : Activity() {
             RoverRuntimeState.log("CAMERA permission already granted")
             refreshCameraSummary()
             refreshCameraList()
+            if (RoverSettings.load(this).cameraEnabled) startCameraPublisher()
             return
         }
         requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST)
@@ -652,11 +751,11 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == CAMERA_PERMISSION_REQUEST) {
-            RoverRuntimeState.log(
-                "CAMERA permission result=${grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED}",
-            )
+            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            RoverRuntimeState.log("CAMERA permission result=$granted")
             refreshCameraSummary()
             refreshCameraList()
+            if (granted && RoverSettings.load(this).cameraEnabled) startCameraPublisher()
         }
     }
 
