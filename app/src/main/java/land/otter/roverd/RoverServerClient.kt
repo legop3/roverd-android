@@ -10,6 +10,7 @@ import org.json.JSONObject
 import java.io.Closeable
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
@@ -22,6 +23,7 @@ class RoverServerClient(
 
     companion object {
         val DEFAULT_STREAM_PACKETS = byteArrayOf(100, 21, 34)
+        private const val DISCONNECT_SEEK_SECONDS = 60L
     }
 
     private val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
@@ -35,6 +37,12 @@ class RoverServerClient(
     @Volatile private var connected = false
     private var reconnectSeconds = 1L
     private var lastSensorSentNs = 0L
+    private var disconnectSeekTask: ScheduledFuture<*>? = null
+
+    private var lastAuxMain = 0
+    private var lastAuxSide = 0
+    private var lastAuxVacuum = 0
+    private var autoSideBrushOn = false
 
     fun start() {
         connect()
@@ -155,11 +163,22 @@ class RoverServerClient(
         when {
             msg.has("driveDirect") -> {
                 val p = msg.getJSONObject("driveDirect")
-                connectedRoomba().driveDirect(p.optInt("left"), p.optInt("right"))
+                val left = p.optInt("left")
+                val right = p.optInt("right")
+                val roomba = connectedRoomba()
+                roomba.driveDirect(left, right)
+                applyAutoSideBrush(roomba, left, right)
             }
             msg.has("motorPwm") -> {
                 val p = msg.getJSONObject("motorPwm")
-                connectedRoomba().motorPwm(p.optInt("main"), p.optInt("side"), p.optInt("vacuum"))
+                val main = p.optInt("main").coerceIn(-127, 127)
+                val side = p.optInt("side").coerceIn(-127, 127)
+                val vacuum = p.optInt("vacuum").coerceIn(0, 127)
+                lastAuxMain = main
+                lastAuxSide = side
+                lastAuxVacuum = vacuum
+                autoSideBrushOn = false
+                connectedRoomba().motorPwm(main, side, vacuum)
             }
             msg.has("sensorStream") -> {
                 val enable = msg.getJSONObject("sensorStream").optBoolean("enable")
@@ -195,6 +214,39 @@ class RoverServerClient(
         }
     }
 
+    private fun applyAutoSideBrush(roomba: UsbRoomba, left: Int, right: Int) {
+        if (!config.autoSideBrushEnabled) {
+            if (autoSideBrushOn) {
+                autoSideBrushOn = false
+                roomba.motorPwm(lastAuxMain, lastAuxSide, lastAuxVacuum)
+                RoverRuntimeState.log("AUTO SIDE BRUSH stopped: feature disabled")
+            }
+            return
+        }
+
+        val moving = left != 0 || right != 0
+        if (!moving) {
+            if (autoSideBrushOn) {
+                autoSideBrushOn = false
+                roomba.motorPwm(lastAuxMain, lastAuxSide, lastAuxVacuum)
+                RoverRuntimeState.log("AUTO SIDE BRUSH stopped: drive stopped")
+            }
+            return
+        }
+
+        if (lastAuxSide != 0) {
+            autoSideBrushOn = false
+            return
+        }
+
+        val speed = config.autoSideBrushSpeed.coerceIn(-127, 127)
+        if (speed == 0 || autoSideBrushOn) return
+
+        roomba.motorPwm(lastAuxMain, speed, lastAuxVacuum)
+        autoSideBrushOn = true
+        RoverRuntimeState.log("AUTO SIDE BRUSH started speed=$speed")
+    }
+
     private fun isModeOpcode(opcode: Int): Boolean = opcode == 128 || opcode == 131 || opcode == 132
 
     private fun sendAck(ws: WebSocket, id: String, error: String?) {
@@ -214,11 +266,44 @@ class RoverServerClient(
         scheduler.schedule({ connect() }, delay, TimeUnit.SECONDS)
     }
 
+    @Synchronized
+    private fun scheduleDisconnectSeek() {
+        if (closed.get() || connected || disconnectSeekTask != null) return
+        RoverRuntimeState.log("WS disconnect failsafe armed: SeekDock in ${DISCONNECT_SEEK_SECONDS}s")
+        disconnectSeekTask = scheduler.schedule(
+            {
+                synchronized(this) { disconnectSeekTask = null }
+                if (closed.get() || connected) return@schedule
+                val roomba = roombaProvider()
+                if (roomba == null || !roomba.isConnected()) {
+                    RoverRuntimeState.log("WS disconnect failsafe could not SeekDock: USB serial not connected")
+                    return@schedule
+                }
+                runCatching { roomba.seekDock() }
+                    .onSuccess {
+                        RoverRuntimeState.log("WS disconnect failsafe SeekDock issued after ${DISCONNECT_SEEK_SECONDS}s")
+                    }
+                    .onFailure {
+                        RoverRuntimeState.log("WS disconnect failsafe SeekDock failed: ${it.stackTraceToString()}")
+                    }
+            },
+            DISCONNECT_SEEK_SECONDS,
+            TimeUnit.SECONDS,
+        )
+    }
+
+    @Synchronized
+    private fun cancelDisconnectSeek() {
+        disconnectSeekTask?.cancel(false)
+        disconnectSeekTask = null
+    }
+
     private inner class Listener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             socket = webSocket
             connected = true
             reconnectSeconds = 1
+            cancelDisconnectSeek()
             RoverRuntimeState.setServerState(true)
             onStatus("Server connected")
             sendHello(webSocket)
@@ -242,6 +327,7 @@ class RoverServerClient(
             connected = false
             RoverRuntimeState.setServerState(false)
             onStatus("Server disconnected: $code $reason")
+            scheduleDisconnectSeek()
             scheduleReconnect()
         }
 
@@ -251,6 +337,7 @@ class RoverServerClient(
             RoverRuntimeState.setServerState(false)
             RoverRuntimeState.log("WS failure response=${response?.code()} exception=${t.stackTraceToString()}")
             onStatus("Server connection failed: ${t.message}")
+            scheduleDisconnectSeek()
             scheduleReconnect()
         }
     }
@@ -258,6 +345,7 @@ class RoverServerClient(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         connected = false
+        cancelDisconnectSeek()
         RoverRuntimeState.setServerState(false)
         socket?.close(1000, "service stopping")
         socket = null
