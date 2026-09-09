@@ -6,17 +6,17 @@ import java.net.URLEncoder
 object MediaUrl {
     fun videoPublishUrl(config: RoverConfig): String {
         if (config.cameraPublishUrl.isNotBlank()) return config.cameraPublishUrl.trim()
-        return deriveRtspUrl(config.serverUrl, config.name, config.cameraRtspPort)
+        return deriveRtspUrl(config.serverUrl, config.name, config.mediaRtspPort)
     }
 
     fun micPublishUrl(config: RoverConfig): String {
         if (config.micPublishUrl.isNotBlank()) return config.micPublishUrl.trim()
-        return deriveRtspUrl(config.serverUrl, config.name + "-audio", config.micRtspPort)
+        return deriveRtspUrl(config.serverUrl, config.name + "-audio", config.mediaRtspPort)
     }
 
     fun audioPlaybackUrl(config: RoverConfig): String {
         if (config.audioPlaybackUrl.isNotBlank()) return config.audioPlaybackUrl.trim()
-        return deriveRtspUrl(config.serverUrl, config.name + "-fwd", config.audioPlaybackRtspPort)
+        return deriveRtspUrl(config.serverUrl, config.name + "-fwd", config.mediaRtspPort)
     }
 
     fun deriveRtspUrl(serverUrl: String, streamName: String, port: Int = 8554): String {
