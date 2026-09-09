@@ -102,6 +102,23 @@ class RoverServerClient(
             }
         }
 
+        val audioCapture = JSONObject().put("enabled", config.micEnabled)
+        if (config.micEnabled) {
+            runCatching {
+                audioCapture
+                    .put("service", "android-microphone")
+                    .put("publisher", "android-mediacodec-opus")
+                    .put("publishUrl", MediaUrl.micPublishUrl(config))
+                    .put("device", "audioSource:${config.micAudioSource}")
+                    .put("sampleRate", config.micSampleRate)
+                    .put("channels", config.micChannels)
+                    .put("bitrate", config.micBitrate)
+            }.onFailure {
+                RoverRuntimeState.log("MIC hello publish URL failure: ${it.stackTraceToString()}")
+                audioCapture.put("enabled", false)
+            }
+        }
+
         val hello = JSONObject()
             .put("type", "hello")
             .put("name", config.name)
@@ -115,7 +132,7 @@ class RoverServerClient(
             .put("media", JSONObject()
                 .put("manage", false)
                 .put("video", video)
-                .put("audioCapture", JSONObject().put("enabled", false))
+                .put("audioCapture", audioCapture)
                 .put("audioPlayback", JSONObject().put("enabled", false)))
             .put("cameraServo", JSONObject().put("enabled", false))
             .put("audio", JSONObject().put("ttsEnabled", false))
