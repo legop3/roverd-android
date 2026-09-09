@@ -12,6 +12,13 @@ data class RoverConfig(
     val brcPulseEveryMs: Long,
     val brcPulseWidthMs: Long,
     val cameraId: String,
+    val cameraEnabled: Boolean,
+    val cameraWidth: Int,
+    val cameraHeight: Int,
+    val cameraFps: Int,
+    val cameraBitrate: Int,
+    val cameraRtspPort: Int,
+    val cameraPublishUrl: String,
 )
 
 enum class BrcLine { RTS, DTR }
@@ -31,6 +38,13 @@ object RoverSettings {
             brcPulseEveryMs = p.getLong("brcPulseEveryMs", 60_000L),
             brcPulseWidthMs = p.getLong("brcPulseWidthMs", 1_000L),
             cameraId = p.getString("cameraId", "0") ?: "0",
+            cameraEnabled = p.getBoolean("cameraEnabled", false),
+            cameraWidth = p.getInt("cameraWidth", 640),
+            cameraHeight = p.getInt("cameraHeight", 480),
+            cameraFps = p.getInt("cameraFps", 30),
+            cameraBitrate = p.getInt("cameraBitrate", 2_000_000),
+            cameraRtspPort = p.getInt("cameraRtspPort", 8554),
+            cameraPublishUrl = p.getString("cameraPublishUrl", "") ?: "",
         )
     }
 
@@ -45,6 +59,13 @@ object RoverSettings {
             .putLong("brcPulseEveryMs", config.brcPulseEveryMs)
             .putLong("brcPulseWidthMs", config.brcPulseWidthMs)
             .putString("cameraId", config.cameraId)
+            .putBoolean("cameraEnabled", config.cameraEnabled)
+            .putInt("cameraWidth", config.cameraWidth)
+            .putInt("cameraHeight", config.cameraHeight)
+            .putInt("cameraFps", config.cameraFps)
+            .putInt("cameraBitrate", config.cameraBitrate)
+            .putInt("cameraRtspPort", config.cameraRtspPort)
+            .putString("cameraPublishUrl", config.cameraPublishUrl)
             .apply()
     }
 }
