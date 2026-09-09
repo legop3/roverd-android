@@ -62,6 +62,8 @@ class MainActivity : Activity() {
     private var brcActiveLowView: CheckBox? = null
     private var brcEveryView: EditText? = null
     private var brcWidthView: EditText? = null
+    private var autoSideBrushEnabledView: CheckBox? = null
+    private var autoSideBrushSpeedView: EditText? = null
 
     private var cameraEnabledView: CheckBox? = null
     private var cameraIdView: Spinner? = null
@@ -195,6 +197,8 @@ class MainActivity : Activity() {
         brcActiveLowView = null
         brcEveryView = null
         brcWidthView = null
+        autoSideBrushEnabledView = null
+        autoSideBrushSpeedView = null
         cameraEnabledView = null
         cameraIdView = null
         cameraIds = emptyList()
@@ -269,6 +273,15 @@ class MainActivity : Activity() {
         val cfg = RoverSettings.load(this)
         baudView = edit(root, "Serial baud").apply { setText(cfg.baud.toString()) }
         speedView = edit(root, "Max wheel speed (mm/s)").apply { setText(cfg.maxWheelSpeed.toString()) }
+
+        autoSideBrushEnabledView = CheckBox(this).apply {
+            text = "Automatic side brush while driving"
+            isChecked = cfg.autoSideBrushEnabled
+        }
+        root.addView(autoSideBrushEnabledView)
+        autoSideBrushSpeedView = edit(root, "Automatic side brush PWM (-127..127)").apply {
+            setText(cfg.autoSideBrushSpeed.toString())
+        }
 
         root.addView(TextView(this).apply { text = "BRC control line" })
         brcLineView = Spinner(this).apply {
@@ -492,13 +505,25 @@ class MainActivity : Activity() {
     private fun roombaSnapshot(): String {
         val now = System.currentTimeMillis()
         val sensorAge = if (RoverRuntimeState.lastSensorAtMs == 0L) "never" else "${now - RoverRuntimeState.lastSensorAtMs} ms ago"
+        val autoChargeAge = if (RoverRuntimeState.lastAutoChargeAtMs == 0L) "never" else "${now - RoverRuntimeState.lastAutoChargeAtMs} ms ago"
+        val chargeSourcesText = if (RoverRuntimeState.chargeSources < 0) "-" else "0x%02X".format(RoverRuntimeState.chargeSources)
+        val chargingStateText = if (RoverRuntimeState.chargingState < 0) "-" else RoverRuntimeState.chargingState.toString()
         val cfg = RoverSettings.load(this)
         return buildString {
             appendLine("USB connected : ${RoverRuntimeState.usbConnected}")
             appendLine("USB device    : ${RoverRuntimeState.usbDevice.ifBlank { "-" }}")
             appendLine("serial        : ${cfg.baud} 8N1")
             appendLine("max wheel     : ${cfg.maxWheelSpeed} mm/s")
+            appendLine("auto side     : enabled=${cfg.autoSideBrushEnabled} speed=${cfg.autoSideBrushSpeed}")
             appendLine("BRC           : ${cfg.brcLine} activeLow=${cfg.brcActiveLow} every=${cfg.brcPulseEveryMs}ms width=${cfg.brcPulseWidthMs}ms")
+            appendLine("charge state  : $chargingStateText")
+            appendLine("charge sources: $chargeSourcesText")
+            appendLine("home base     : ${RoverRuntimeState.homeBaseDetected}")
+            appendLine("charging      : ${RoverRuntimeState.roombaCharging}")
+            appendLine("AutoCharge    : ${RoverRuntimeState.autoChargeState}")
+            appendLine("AC timer      : ${RoverRuntimeState.autoChargeTimerActive}")
+            appendLine("AC seek count : ${RoverRuntimeState.autoChargeSeekCount}")
+            appendLine("last AC seek  : $autoChargeAge")
             appendLine("sensor frames : ${RoverRuntimeState.sensorFrames}")
             appendLine("sensor bytes  : ${RoverRuntimeState.sensorBytes}")
             appendLine("last sensor   : $sensorAge")
@@ -623,9 +648,11 @@ class MainActivity : Activity() {
             brcActiveLow = brcActiveLowView?.isChecked ?: old.brcActiveLow,
             brcPulseEveryMs = brcEveryView?.text?.toString()?.toLongOrNull() ?: old.brcPulseEveryMs,
             brcPulseWidthMs = brcWidthView?.text?.toString()?.toLongOrNull() ?: old.brcPulseWidthMs,
+            autoSideBrushEnabled = autoSideBrushEnabledView?.isChecked ?: old.autoSideBrushEnabled,
+            autoSideBrushSpeed = (autoSideBrushSpeedView?.text?.toString()?.toIntOrNull() ?: old.autoSideBrushSpeed).coerceIn(-127, 127),
         )
         RoverSettings.save(this, cfg)
-        RoverRuntimeState.log("UI saved ROOMBA settings")
+        RoverRuntimeState.log("UI saved ROOMBA settings autoSide=${cfg.autoSideBrushEnabled}/${cfg.autoSideBrushSpeed}")
         sendServiceAction(RoverService.ACTION_RESTART)
         refreshVisiblePage()
     }
@@ -650,8 +677,8 @@ class MainActivity : Activity() {
                 "bitrate=${cfg.cameraBitrate} rtspPort=${cfg.cameraRtspPort} effectiveUrl=${effectiveCameraPublishUrl(cfg)}",
         )
 
-        // The rover hello contains media.video metadata, so restart only the rover WebSocket runtime to republish it.
-        sendServiceAction(RoverService.ACTION_RESTART)
+        // Republish media.video metadata without bouncing the USB/serial runtime.
+        sendServiceAction(RoverService.ACTION_RECONNECT_SERVER)
 
         if (cfg.cameraEnabled) {
             if (Build.VERSION.SDK_INT < 21) {
