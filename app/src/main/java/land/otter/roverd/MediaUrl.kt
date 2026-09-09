@@ -14,6 +14,11 @@ object MediaUrl {
         return deriveRtspUrl(config.serverUrl, config.name + "-audio", config.micRtspPort)
     }
 
+    fun audioPlaybackUrl(config: RoverConfig): String {
+        if (config.audioPlaybackUrl.isNotBlank()) return config.audioPlaybackUrl.trim()
+        return deriveRtspUrl(config.serverUrl, config.name + "-fwd", config.audioPlaybackRtspPort)
+    }
+
     fun deriveRtspUrl(serverUrl: String, streamName: String, port: Int = 8554): String {
         val uri = runCatching { URI(serverUrl) }
             .getOrElse { throw IllegalArgumentException("Invalid rover server URL: $serverUrl", it) }
