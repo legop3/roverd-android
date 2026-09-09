@@ -60,6 +60,18 @@ class RoverServerClient(
         socket?.send(msg.toString())
     }
 
+    fun sendEvent(event: String, data: Map<String, Any>) {
+        val payload = JSONObject()
+        data.forEach { (key, value) -> payload.put(key, value) }
+        val msg = JSONObject()
+            .put("type", "event")
+            .put("event", event)
+            .put("ts", System.currentTimeMillis())
+            .put("data", payload)
+        RoverRuntimeState.log("EVENT event=$event data=${payload.toString()}")
+        if (connected) socket?.send(msg.toString())
+    }
+
     private fun sendHello(ws: WebSocket) {
         val disabledToggle = JSONObject()
             .put("enabled", false)
