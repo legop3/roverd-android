@@ -6,13 +6,7 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.os.Build
 
-/**
- * Maps the rover's logical headlight to the phone's camera LED torch.
- *
- * If the flash belongs to the currently-open Camera2 source, use that source's
- * capture request so the video stream is not interrupted. Otherwise use
- * CameraManager.setTorchMode() on API 23+.
- */
+/** Maps the rover's logical headlight to the phone's camera LED torch. */
 object HeadlightController {
     private val lock = Any()
 
@@ -25,7 +19,19 @@ object HeadlightController {
 
     fun initialize(context: Context) {
         appContext = context.applicationContext
-        RoverRuntimeState.log("HEADLIGHT initialized available=${isAvailable()}")
+        val cfg = RoverSettings.load(context)
+        requestedOn = cfg.headlightEnabled && cfg.headlightInitialOn
+        RoverRuntimeState.log(
+            "HEADLIGHT initialized hardwareAvailable=${isAvailable()} enabled=${cfg.headlightEnabled} initialOn=${cfg.headlightInitialOn}",
+        )
+        if (requestedOn) {
+            runCatching { set(true, cfg.cameraId, ignoreConfiguredEnabled = true) }
+                .onFailure {
+                    // API 21-22 can only apply once the streaming camera opens. The requested
+                    // state is retained and onCameraOpened() will apply it there.
+                    RoverRuntimeState.log("HEADLIGHT initial ON deferred/failed: ${it.message}")
+                }
+        }
     }
 
     fun isAvailable(): Boolean {
@@ -41,6 +47,8 @@ object HeadlightController {
     fun isOn(): Boolean = requestedOn
 
     fun handleAction(action: String, preferredCameraId: String = "") {
+        val context = appContext ?: throw IllegalStateException("headlight controller not initialized")
+        if (!RoverSettings.load(context).headlightEnabled) throw IllegalStateException("headlight disabled")
         val next = synchronized(lock) {
             when (action.trim().lowercase()) {
                 "", "toggle" -> !requestedOn
@@ -52,9 +60,24 @@ object HeadlightController {
         set(next, preferredCameraId)
     }
 
-    fun set(on: Boolean, preferredCameraId: String = "") {
+    fun applyConfiguredState(config: RoverConfig) {
+        if (!config.headlightEnabled) {
+            runCatching { set(false, config.cameraId, ignoreConfiguredEnabled = true) }
+                .onFailure {
+                    requestedOn = false
+                    lastError = it.message ?: it.javaClass.simpleName
+                }
+            return
+        }
+        set(config.headlightInitialOn, config.cameraId, ignoreConfiguredEnabled = true)
+    }
+
+    fun set(on: Boolean, preferredCameraId: String = "", ignoreConfiguredEnabled: Boolean = false) {
         synchronized(lock) {
             val context = appContext ?: throw IllegalStateException("headlight controller not initialized")
+            if (!ignoreConfiguredEnabled && !RoverSettings.load(context).headlightEnabled) {
+                throw IllegalStateException("headlight disabled")
+            }
             if (Build.VERSION.SDK_INT < 21) throw UnsupportedOperationException("phone flashlight requires Android 5.0+")
 
             val flashIds = flashCameraIds(context)
@@ -84,8 +107,6 @@ object HeadlightController {
                     return
                 }
 
-                // On API 21-22 there is no CameraManager.setTorchMode(). We can still
-                // control the LED without reopening the camera when the active stream owns it.
                 throw UnsupportedOperationException("on Android 5.0/5.1 the flashlight requires the flash camera to be actively streaming")
             } catch (t: Throwable) {
                 lastError = t.message ?: t.javaClass.simpleName
@@ -107,9 +128,10 @@ object HeadlightController {
         synchronized(lock) {
             if (activeSource !== source) return
             activeSourceId = cameraId
-            if (!requestedOn) return
-
             val context = appContext ?: return
+            val cfg = RoverSettings.load(context)
+            if (!cfg.headlightEnabled || !requestedOn) return
+
             val flashIds = runCatching { flashCameraIds(context) }.getOrDefault(emptyList())
             if (cameraId !in flashIds) return
 
@@ -141,7 +163,10 @@ object HeadlightController {
         val flashIds = if (context != null && Build.VERSION.SDK_INT >= 21) {
             runCatching { flashCameraIds(context) }.getOrDefault(emptyList())
         } else emptyList()
+        val cfg = context?.let { RoverSettings.load(it) }
         return buildString {
+            appendLine("configured    : ${cfg?.headlightEnabled ?: false}")
+            appendLine("initial on    : ${cfg?.headlightInitialOn ?: false}")
             appendLine("available     : ${flashIds.isNotEmpty()}")
             appendLine("flash IDs     : ${if (flashIds.isEmpty()) "none" else flashIds.joinToString()}")
             appendLine("requested on  : $requestedOn")
