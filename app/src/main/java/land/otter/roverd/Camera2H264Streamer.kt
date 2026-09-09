@@ -261,7 +261,7 @@ class Camera2H264Streamer(
         builder.addTarget(surface)
         builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
 
-        val aeModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES).orEmpty()
+        val aeModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES) ?: intArrayOf()
         if (CaptureRequest.CONTROL_AE_MODE_ON in aeModes) {
             builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
         }
@@ -277,7 +277,7 @@ class Camera2H264Streamer(
         }
         selectedFpsRange?.let { builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
 
-        val awbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES).orEmpty()
+        val awbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES) ?: intArrayOf()
         if (CaptureRequest.CONTROL_AWB_MODE_AUTO in awbModes) {
             builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
         }
@@ -285,7 +285,7 @@ class Camera2H264Streamer(
             builder.set(CaptureRequest.CONTROL_AWB_LOCK, false)
         }
 
-        val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES).orEmpty()
+        val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES) ?: intArrayOf()
         when {
             CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO in afModes ->
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
@@ -293,7 +293,7 @@ class Camera2H264Streamer(
                 builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
         }
 
-        val effects = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_EFFECTS).orEmpty()
+        val effects = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_EFFECTS) ?: intArrayOf()
         if (CaptureRequest.CONTROL_EFFECT_MODE_OFF in effects) {
             builder.set(CaptureRequest.CONTROL_EFFECT_MODE, CaptureRequest.CONTROL_EFFECT_MODE_OFF)
         }
