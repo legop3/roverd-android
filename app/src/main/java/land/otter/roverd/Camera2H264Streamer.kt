@@ -158,13 +158,13 @@ class Camera2H264Streamer(
      * cameraRotation is treated as PHONE MOUNT rotation, not encoder/output rotation:
      *   -1 = read the phone/display rotation once when the stream starts
      *    0 = phone natural orientation
-     *   90 = phone mounted landscape/right
+     *   90 = phone/display rotated 90 degrees
      *  180 = upside down
-     *  270 = phone mounted landscape/left
+     *  270 = phone/display rotated 270 degrees
      *
-     * The camera sensor's physical mount angle is then removed from that. This keeps sensor
-     * metadata separate from actual stream geometry and makes auto-rotate changes irrelevant after
-     * startup.
+     * Camera2 SENSOR_ORIENTATION describes how the sensor is physically mounted relative to the
+     * device's natural orientation. Use Android's documented relative-rotation formulas instead of
+     * presenting that sensor value as if it were a stream rotation setting.
      */
     private fun resolveOrientationPlan(): OrientationPlan {
         val catalog = runCatching { CameraDiagnostics.modeCatalog(appContext, config.cameraId) }.getOrNull()
@@ -174,12 +174,22 @@ class Camera2H264Streamer(
         } else {
             currentPhoneRotationDegrees()
         }
-        val pixelRotation = normalizeRotation(phoneMount - sensorMount)
+        val facing = catalog?.facing ?: "UNKNOWN"
+
+        // Android Camera2 relative image orientation:
+        // back/external: sensor - device; front: sensor + device (front preview mirroring is a
+        // separate concern and is intentionally not mixed into encoded-frame geometry here).
+        val pixelRotation = if (facing.equals("FRONT", ignoreCase = true)) {
+            normalizeRotation(sensorMount + phoneMount)
+        } else {
+            normalizeRotation(sensorMount - phoneMount)
+        }
+
         return OrientationPlan(
             sensorMount = sensorMount,
             phoneMount = phoneMount,
             pixelRotation = pixelRotation,
-            facing = catalog?.facing ?: "UNKNOWN",
+            facing = facing,
             autoMount = config.cameraRotation < 0,
         )
     }
