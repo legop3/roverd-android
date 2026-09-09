@@ -17,11 +17,17 @@ data class RoverConfig(
     val cameraEnabled: Boolean,
     val cameraWidth: Int,
     val cameraHeight: Int,
-    val cameraFps: Int,
+    val cameraFpsMin: Int,
+    val cameraFpsMax: Int,
     val cameraBitrate: Int,
+    val cameraRotation: Int,
+    val cameraExposureCompensation: Int,
+    val cameraEncoderName: String,
     val cameraRtspPort: Int,
     val cameraPublishUrl: String,
-)
+) {
+    val cameraFps: Int get() = cameraFpsMax
+}
 
 enum class BrcLine { RTS, DTR }
 
@@ -30,6 +36,7 @@ object RoverSettings {
 
     fun load(context: Context): RoverConfig {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val legacyFps = p.getInt("cameraFps", 30)
         return RoverConfig(
             name = p.getString("name", "android-rover") ?: "android-rover",
             serverUrl = p.getString("serverUrl", "wss://rover.otter.land/rover") ?: "wss://rover.otter.land/rover",
@@ -45,8 +52,12 @@ object RoverSettings {
             cameraEnabled = p.getBoolean("cameraEnabled", false),
             cameraWidth = p.getInt("cameraWidth", 640),
             cameraHeight = p.getInt("cameraHeight", 480),
-            cameraFps = p.getInt("cameraFps", 30),
+            cameraFpsMin = p.getInt("cameraFpsMin", legacyFps),
+            cameraFpsMax = p.getInt("cameraFpsMax", legacyFps),
             cameraBitrate = p.getInt("cameraBitrate", 2_000_000),
+            cameraRotation = p.getInt("cameraRotation", -1),
+            cameraExposureCompensation = p.getInt("cameraExposureCompensation", 0),
+            cameraEncoderName = p.getString("cameraEncoderName", "AUTO") ?: "AUTO",
             cameraRtspPort = p.getInt("cameraRtspPort", 8554),
             cameraPublishUrl = p.getString("cameraPublishUrl", "") ?: "",
         )
@@ -68,8 +79,13 @@ object RoverSettings {
             .putBoolean("cameraEnabled", config.cameraEnabled)
             .putInt("cameraWidth", config.cameraWidth)
             .putInt("cameraHeight", config.cameraHeight)
-            .putInt("cameraFps", config.cameraFps)
+            .putInt("cameraFpsMin", config.cameraFpsMin)
+            .putInt("cameraFpsMax", config.cameraFpsMax)
+            .putInt("cameraFps", config.cameraFpsMax)
             .putInt("cameraBitrate", config.cameraBitrate)
+            .putInt("cameraRotation", config.cameraRotation)
+            .putInt("cameraExposureCompensation", config.cameraExposureCompensation)
+            .putString("cameraEncoderName", config.cameraEncoderName)
             .putInt("cameraRtspPort", config.cameraRtspPort)
             .putString("cameraPublishUrl", config.cameraPublishUrl)
             .apply()
