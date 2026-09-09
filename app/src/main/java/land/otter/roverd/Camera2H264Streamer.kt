@@ -23,6 +23,7 @@ class Camera2H264Streamer(
     private val restartRequested = AtomicBoolean(false)
 
     @Volatile private var stream: RoverH264Stream? = null
+    @Volatile private var cameraSource: RoverCamera2Source? = null
     private var statsThread: Thread? = null
 
     private val publishUrl: String by lazy { MediaUrl.videoPublishUrl(config) }
@@ -42,6 +43,8 @@ class Camera2H264Streamer(
         val orientation = resolveOrientationPlan()
         val fps = config.cameraFpsMax.coerceIn(1, 120)
         val source = RoverCamera2Source(appContext, config.cameraId)
+        cameraSource = source
+        HeadlightController.registerCameraSource(source, config.cameraId)
         val roverStream = RoverH264Stream(appContext, source)
         stream = roverStream
 
@@ -69,6 +72,7 @@ class Camera2H264Streamer(
                 RoverRuntimeState.log("CAMERA Camera2 source opened id=${config.cameraId}")
                 runCatching { source.applyAutomaticControls(config.cameraExposureCompensation) }
                     .onFailure { RoverRuntimeState.log("CAMERA controls failed: ${it.stackTraceToString()}") }
+                HeadlightController.onCameraOpened(source, config.cameraId)
             }
 
             override fun onCameraChanged(facing: CameraHelper.Facing) {
@@ -240,12 +244,15 @@ class Camera2H264Streamer(
         if (!closed.compareAndSet(false, true)) return
         statsThread?.interrupt()
         statsThread = null
+        val source = cameraSource
         stream?.let { roverStream ->
             runCatching { if (roverStream.isStreaming) roverStream.stopStream() }
             runCatching { roverStream.release() }
             runCatching { roverStream.closeTransport() }
         }
         stream = null
+        if (source != null) HeadlightController.unregisterCameraSource(source)
+        cameraSource = null
         RoverRuntimeState.setCameraPipelineState(running = false, state = "Stopped", error = "")
         RoverRuntimeState.setCameraPublisherState(false, "Stopped", "")
         RoverRuntimeState.log("CAMERA pipeline stopped")
