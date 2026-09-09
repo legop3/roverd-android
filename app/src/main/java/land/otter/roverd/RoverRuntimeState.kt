@@ -38,6 +38,23 @@ object RoverRuntimeState {
     @Volatile var lastCommand: String = ""
         private set
 
+    @Volatile var chargingState: Int = -1
+        private set
+    @Volatile var chargeSources: Int = -1
+        private set
+    @Volatile var homeBaseDetected: Boolean = false
+        private set
+    @Volatile var roombaCharging: Boolean = false
+        private set
+    @Volatile var autoChargeState: String = "no sensor sample"
+        private set
+    @Volatile var autoChargeTimerActive: Boolean = false
+        private set
+    @Volatile var autoChargeSeekCount: Long = 0
+        private set
+    @Volatile var lastAutoChargeAtMs: Long = 0
+        private set
+
     @Volatile var cameraRunning: Boolean = false
         private set
     @Volatile var cameraState: String = "Stopped"
@@ -136,6 +153,31 @@ object RoverRuntimeState {
         wakeLockHeld = wakeHeld
         wifiLockHeld = wifiHeld
         log("POWER locks wake=$wakeHeld wifi=$wifiHeld")
+    }
+
+    fun setChargeState(
+        chargingState: Int,
+        chargeSources: Int,
+        homeBaseDetected: Boolean,
+        charging: Boolean,
+    ) {
+        this.chargingState = chargingState
+        this.chargeSources = chargeSources
+        this.homeBaseDetected = homeBaseDetected
+        roombaCharging = charging
+    }
+
+    fun setAutoChargeState(state: String, timerActive: Boolean) {
+        autoChargeState = state
+        autoChargeTimerActive = timerActive
+    }
+
+    fun recordAutoChargeSeek(state: String) {
+        autoChargeSeekCount += 1
+        lastAutoChargeAtMs = System.currentTimeMillis()
+        autoChargeState = state
+        autoChargeTimerActive = false
+        log("AUTOCHARGE $state count=$autoChargeSeekCount")
     }
 
     fun setCameraPipelineState(
