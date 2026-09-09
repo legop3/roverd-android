@@ -59,4 +59,8 @@ dependencies {
     // Camera2/MediaCodec implementation used by the API 21+ camera subsystem.
     // The root build pins all RootEncoder modules to the same current release.
     implementation("com.github.pedroSG94.RootEncoder:library:2.8.0")
+
+    // Stable VLC Android bindings for the rover's RTSP/TCP Opus reverse-audio stream.
+    // This avoids another custom RTSP/RTP/Opus decoder stack and preserves the old app floor.
+    implementation("org.videolan.android:libvlc-all:3.7.5")
 }
