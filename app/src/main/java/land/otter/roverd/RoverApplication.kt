@@ -7,6 +7,7 @@ class RoverApplication : MultiDexApplication() {
         super.onCreate()
         RoverRuntimeState.initialize(this)
         CrashLogger.install(this)
+        RoverAudioController.initialize(this)
         RoverRuntimeState.log("APPLICATION onCreate complete")
     }
 }
