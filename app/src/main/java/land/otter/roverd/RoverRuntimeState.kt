@@ -38,6 +38,49 @@ object RoverRuntimeState {
     @Volatile var lastCommand: String = ""
         private set
 
+    @Volatile var cameraRunning: Boolean = false
+        private set
+    @Volatile var cameraState: String = "Stopped"
+        private set
+    @Volatile var cameraId: String = ""
+        private set
+    @Volatile var cameraEncoderName: String = ""
+        private set
+    @Volatile var cameraWidth: Int = 0
+        private set
+    @Volatile var cameraHeight: Int = 0
+        private set
+    @Volatile var cameraFps: Int = 0
+        private set
+    @Volatile var cameraBitrate: Int = 0
+        private set
+    @Volatile var cameraPublishUrl: String = ""
+        private set
+    @Volatile var cameraPublisherConnected: Boolean = false
+        private set
+    @Volatile var cameraPublisherState: String = "Stopped"
+        private set
+    @Volatile var cameraLastError: String = ""
+        private set
+    @Volatile var cameraEncodedFrames: Long = 0
+        private set
+    @Volatile var cameraEncodedBytes: Long = 0
+        private set
+    @Volatile var cameraPublishedFrames: Long = 0
+        private set
+    @Volatile var cameraPublishedBytes: Long = 0
+        private set
+    @Volatile var cameraDroppedFrames: Long = 0
+        private set
+    @Volatile var cameraReconnects: Long = 0
+        private set
+    @Volatile var lastCameraEncodedAtMs: Long = 0
+        private set
+    @Volatile var lastCameraPublishedAtMs: Long = 0
+        private set
+    @Volatile var lastCameraKeyFrameAtMs: Long = 0
+        private set
+
     private val statusListeners = CopyOnWriteArrayList<(String) -> Unit>()
     private val logListeners = CopyOnWriteArrayList<() -> Unit>()
     private val logLock = Any()
@@ -93,6 +136,69 @@ object RoverRuntimeState {
         wakeLockHeld = wakeHeld
         wifiLockHeld = wifiHeld
         log("POWER locks wake=$wakeHeld wifi=$wifiHeld")
+    }
+
+    fun setCameraPipelineState(
+        running: Boolean? = null,
+        state: String? = null,
+        cameraId: String? = null,
+        encoderName: String? = null,
+        width: Int? = null,
+        height: Int? = null,
+        fps: Int? = null,
+        bitrate: Int? = null,
+        publishUrl: String? = null,
+        error: String? = null,
+    ) {
+        running?.let { cameraRunning = it }
+        state?.let { cameraState = it }
+        cameraId?.let { this.cameraId = it }
+        encoderName?.let { cameraEncoderName = it }
+        width?.let { cameraWidth = it }
+        height?.let { cameraHeight = it }
+        fps?.let { cameraFps = it }
+        bitrate?.let { cameraBitrate = it }
+        publishUrl?.let { cameraPublishUrl = it }
+        error?.let { cameraLastError = it }
+    }
+
+    fun setCameraPublisherState(connected: Boolean, state: String, error: String = "") {
+        cameraPublisherConnected = connected
+        cameraPublisherState = state
+        if (error.isNotEmpty()) cameraLastError = error
+    }
+
+    fun recordCameraEncodedFrame(bytes: Int, keyFrame: Boolean) {
+        cameraEncodedFrames += 1
+        cameraEncodedBytes += bytes
+        lastCameraEncodedAtMs = System.currentTimeMillis()
+        if (keyFrame) lastCameraKeyFrameAtMs = lastCameraEncodedAtMs
+    }
+
+    fun recordCameraPublishedFrame(bytes: Int) {
+        cameraPublishedFrames += 1
+        cameraPublishedBytes += bytes
+        lastCameraPublishedAtMs = System.currentTimeMillis()
+    }
+
+    fun recordCameraDrop() {
+        cameraDroppedFrames += 1
+    }
+
+    fun recordCameraReconnect() {
+        cameraReconnects += 1
+    }
+
+    fun resetCameraCounters() {
+        cameraEncodedFrames = 0
+        cameraEncodedBytes = 0
+        cameraPublishedFrames = 0
+        cameraPublishedBytes = 0
+        cameraDroppedFrames = 0
+        cameraReconnects = 0
+        lastCameraEncodedAtMs = 0
+        lastCameraPublishedAtMs = 0
+        lastCameraKeyFrameAtMs = 0
     }
 
     fun recordSensor(frame: ByteArray) {
