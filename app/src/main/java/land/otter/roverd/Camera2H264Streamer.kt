@@ -38,7 +38,7 @@ class Camera2H264Streamer(
         val phoneMount: Int,
         val pixelRotation: Int,
         val facing: String,
-        val autoMount: Boolean,
+        val automatic: Boolean,
     )
 
     fun start() {
@@ -52,12 +52,10 @@ class Camera2H264Streamer(
 
         rtsp.getStreamClient().apply {
             setProtocol(Protocol.TCP)
-            // This rover stream is video-only. Explicitly omit an unused audio track from SDP/SETUP.
             setOnlyVideo(true)
             setReTries(100)
-            // RootEncoder's RTSP "server alive" check uses an Echo/reachability probe. A valid
-            // MediaMTX TCP session can fail that probe, which was killing healthy streams after a
-            // few seconds. Frame progress below is a much better health check for a rover camera.
+            // RootEncoder's optional server-alive probe is ICMP/Echo-style reachability, not RTSP
+            // health. It can kill a perfectly healthy MediaMTX TCP publish session after seconds.
             setCheckServerAlive(false)
             setLogs(true)
         }
@@ -119,14 +117,13 @@ class Camera2H264Streamer(
         RoverRuntimeState.log(
             "CAMERA RootEncoder prepare id=${config.cameraId} output=${config.cameraWidth}x${config.cameraHeight} " +
                 "fpsCeiling=$fps selectedRange=${config.cameraFpsMin}-${config.cameraFpsMax} bitrate=${config.cameraBitrate} " +
-                "sensorMount=${orientation.sensorMount} phoneMount=${orientation.phoneMount} " +
-                "pixelRotation=${orientation.pixelRotation} autoMount=${orientation.autoMount} facing=${orientation.facing} " +
+                "sensorMount=${orientation.sensorMount} phoneRotation=${orientation.phoneMount} " +
+                "pixelRotation=${orientation.pixelRotation} automatic=${orientation.automatic} facing=${orientation.facing} " +
                 "codec=${codecPreference.name} url=$publishUrl",
         )
 
-        // IMPORTANT: Always prepare the encoder at rotation=0 so RootEncoder does not swap encoder
-        // width/height for 90/270 degrees. The image rotation is applied later in GLES while the
-        // encoded H.264 dimensions remain exactly the selected dimensions.
+        // Keep encoder/container dimensions fixed. RootEncoder swaps width/height when its encoder
+        // rotation is 90/270, which is exactly the vertical-container failure we don't want.
         val prepared = rtsp.prepareVideo(
             config.cameraWidth,
             config.cameraHeight,
@@ -142,8 +139,8 @@ class Camera2H264Streamer(
         }
 
         rtsp.startStream(publishUrl)
-        // Camera opening is asynchronous. Set this immediately and again from onCameraOpened so
-        // RootEncoder's own prepareGlView cannot win a race and restore its legacy rotation mapping.
+        // Camera opening is asynchronous. Apply immediately and again from onCameraOpened so
+        // RootEncoder's own prepareGlView cannot win a race and restore legacy rotation mapping.
         applyFixedOutputGeometry(rtsp, orientation)
 
         RoverRuntimeState.setCameraPipelineState(
@@ -155,42 +152,36 @@ class Camera2H264Streamer(
     }
 
     /**
-     * cameraRotation is treated as PHONE MOUNT rotation, not encoder/output rotation:
-     *   -1 = read the phone/display rotation once when the stream starts
-     *    0 = phone natural orientation
-     *   90 = phone/display rotated 90 degrees
-     *  180 = upside down
-     *  270 = phone/display rotated 270 degrees
-     *
-     * Camera2 SENSOR_ORIENTATION describes how the sensor is physically mounted relative to the
-     * device's natural orientation. Use Android's documented relative-rotation formulas instead of
-     * presenting that sensor value as if it were a stream rotation setting.
+     * Manual values are literal final-image rotations. AUTO alone uses Camera2 sensor mounting plus
+     * the phone/display rotation sampled once at stream startup. Later UI auto-rotation cannot
+     * mutate the stream.
      */
     private fun resolveOrientationPlan(): OrientationPlan {
         val catalog = runCatching { CameraDiagnostics.modeCatalog(appContext, config.cameraId) }.getOrNull()
         val sensorMount = normalizeRotation(catalog?.sensorOrientation ?: 0)
-        val phoneMount = if (config.cameraRotation >= 0) {
-            normalizeRotation(config.cameraRotation)
-        } else {
-            currentPhoneRotationDegrees()
-        }
+        val phoneRotation = currentPhoneRotationDegrees()
         val facing = catalog?.facing ?: "UNKNOWN"
+        val automatic = config.cameraRotation < 0
 
-        // Android Camera2 relative image orientation:
-        // back/external: sensor - device; front: sensor + device (front preview mirroring is a
-        // separate concern and is intentionally not mixed into encoded-frame geometry here).
-        val pixelRotation = if (facing.equals("FRONT", ignoreCase = true)) {
-            normalizeRotation(sensorMount + phoneMount)
+        val pixelRotation = if (!automatic) {
+            // 0/90/180/270 in the UI mean exactly those pixel rotations. This deliberately bypasses
+            // vendor metadata so there is always a deterministic manual correction available.
+            normalizeRotation(config.cameraRotation)
+        } else if (facing.equals("FRONT", ignoreCase = true)) {
+            // Android Camera2 relative image orientation for a front-facing sensor. Mirroring is a
+            // separate presentation choice and is not mixed into encoded-frame geometry.
+            normalizeRotation(sensorMount + phoneRotation)
         } else {
-            normalizeRotation(sensorMount - phoneMount)
+            // Android Camera2 relative image orientation for back/external sensors.
+            normalizeRotation(sensorMount - phoneRotation)
         }
 
         return OrientationPlan(
             sensorMount = sensorMount,
-            phoneMount = phoneMount,
+            phoneMount = phoneRotation,
             pixelRotation = pixelRotation,
             facing = facing,
-            autoMount = config.cameraRotation < 0,
+            automatic = automatic,
         )
     }
 
@@ -215,10 +206,9 @@ class Camera2H264Streamer(
             return
         }
 
-        // RootEncoder's legacy Camera2Base normally rotates the camera FBO and swaps encoder
-        // geometry. For this rover we instead keep the camera FBO neutral, rotate only the final
-        // screen pass, and tell its viewport calculator when the source is quarter-turned. This
-        // prevents the vertical-container / sideways-content / squashed-image failure mode.
+        // Neutral camera FBO + final-screen rotation. The viewport calculator receives whether this
+        // is a quarter-turn so it letter/pillarboxes instead of stretching a portrait image across a
+        // landscape canvas. H.264 dimensions remain exactly the selected dimensions.
         gl.autoHandleOrientation = false
         gl.setRotation(0)
         gl.setStreamRotation(orientation.pixelRotation)
