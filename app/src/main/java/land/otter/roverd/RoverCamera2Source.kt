@@ -74,5 +74,10 @@ class RoverCamera2Source(
         camera.dynamicFps = true
     }
 
+    fun setTorch(on: Boolean) {
+        check(isRunning()) { "camera $cameraId is not running" }
+        if (on) camera.enableLantern() else camera.disableLantern()
+    }
+
     fun currentCameraId(): String = camera.getCurrentCameraId()
 }
