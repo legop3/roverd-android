@@ -14,13 +14,12 @@ import android.os.IBinder
 import android.os.Looper
 import com.pedro.common.AudioCodec
 import com.pedro.common.ConnectChecker
-import com.pedro.encoder.input.audio.AmplitudeEffect
 import com.pedro.encoder.utils.CodecUtil
 import com.pedro.library.rtsp.RtspOnlyAudio
 import com.pedro.rtsp.rtsp.Protocol
 import kotlin.math.min
 
-class MicPublisherService : Service(), ConnectChecker {
+class MicPublisherService : Service() {
     companion object {
         private const val CHANNEL_ID = "roverd-mic"
         private const val NOTIFICATION_ID = 3
@@ -34,12 +33,14 @@ class MicPublisherService : Service(), ConnectChecker {
 
     private val handler = Handler(Looper.getMainLooper())
     private var stream: RtspOnlyAudio? = null
-    private var amplitudeEffect: AmplitudeEffect? = null
     private var pendingRestart: Runnable? = null
     private var statsTask: Runnable? = null
     private var restartAttempt = 0
     private var manualStop = false
     private var destroying = false
+
+    private var generationCounter = 0L
+    @Volatile private var activeGeneration = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -48,22 +49,33 @@ class MicPublisherService : Service(), ConnectChecker {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> {
-                manualStop = true
-                cancelRestart()
-                stopSelf()
-                return START_NOT_STICKY
+        try {
+            when (intent?.action) {
+                ACTION_STOP -> {
+                    RoverRuntimeState.log("MIC manual stop requested")
+                    manualStop = true
+                    cancelRestart()
+                    invalidateCurrentGeneration()
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                ACTION_RESTART -> {
+                    RoverRuntimeState.log("MIC in-service restart requested")
+                    manualStop = false
+                    restartAttempt = 0
+                    cancelRestart()
+                    startPipeline(forceRestart = true)
+                }
+                ACTION_START, null -> {
+                    manualStop = false
+                    if (stream == null) startPipeline(forceRestart = false)
+                }
             }
-            ACTION_RESTART -> {
-                manualStop = false
-                restartAttempt = 0
-                cancelRestart()
-                startPipeline(forceRestart = true)
-            }
-            ACTION_START, null -> {
-                manualStop = false
-                if (stream == null) startPipeline(forceRestart = false)
+        } catch (t: Throwable) {
+            RoverRuntimeState.log("MIC onStartCommand failure: ${t.stackTraceToString()}")
+            MicRuntimeState.markStopped("Microphone service command failed", t.message ?: t.javaClass.simpleName)
+            if (!manualStop && !destroying && RoverSettings.load(this).micEnabled) {
+                scheduleRestart("service command failure: ${t.message ?: t.javaClass.simpleName}", activeGeneration)
             }
         }
         return START_STICKY
@@ -71,8 +83,14 @@ class MicPublisherService : Service(), ConnectChecker {
 
     private fun startPipeline(forceRestart: Boolean) {
         if (!forceRestart && stream != null) return
-        stopPipeline(markStopped = false)
+
         cancelRestart()
+
+        // Retire the old stream before asking RootEncoder to stop it. Its RTSP callbacks can arrive
+        // asynchronously during teardown; generation checks below make those callbacks harmless.
+        val generation = ++generationCounter
+        activeGeneration = generation
+        stopPipeline(markStopped = false)
 
         val cfg = RoverSettings.load(this)
         if (!cfg.micEnabled) {
@@ -90,7 +108,7 @@ class MicPublisherService : Service(), ConnectChecker {
         val url = runCatching { MediaUrl.micPublishUrl(cfg) }.getOrElse {
             MicRuntimeState.markStopped("Invalid RTSP URL", it.message ?: it.javaClass.simpleName)
             RoverRuntimeState.log("MIC URL derivation failed: ${it.stackTraceToString()}")
-            scheduleRestart("URL error: ${it.message}")
+            scheduleRestart("URL error: ${it.message}", generation)
             return
         }
 
@@ -112,10 +130,11 @@ class MicPublisherService : Service(), ConnectChecker {
                 rate = cfg.micSampleRate,
                 channelCount = cfg.micChannels,
                 bitrate = cfg.micBitrate,
+                gain = cfg.micGainDb,
                 encoderName = opusEncoders.joinToString(),
             )
 
-            val audio = RtspOnlyAudio(this)
+            val audio = RtspOnlyAudio(connectCheckerFor(generation))
             audio.setAudioCodec(AudioCodec.OPUS)
             audio.forceCodecType(CodecUtil.CodecType.FIRST_COMPATIBLE_FOUND)
             audio.getStreamClient().apply {
@@ -126,12 +145,11 @@ class MicPublisherService : Service(), ConnectChecker {
                 setLogs(false)
             }
 
-            val amp = AmplitudeEffect(object : AmplitudeEffect.Listener {
-                override fun onAmplitude(value: Float) {
-                    MicRuntimeState.amplitude = value
-                }
-            })
-            audio.setCustomAudioEffect(amp)
+            audio.setCustomAudioEffect(
+                MicGainEffect(cfg.micGainDb) { value ->
+                    if (generation == activeGeneration) MicRuntimeState.amplitude = value
+                },
+            )
 
             val prepared = audio.prepareAudio(
                 cfg.micAudioSource,
@@ -148,30 +166,88 @@ class MicPublisherService : Service(), ConnectChecker {
             }
 
             stream = audio
-            amplitudeEffect = amp
-            amp.start()
             RoverRuntimeState.log(
-                "MIC starting source=${cfg.micAudioSource} rate=${cfg.micSampleRate} channels=${cfg.micChannels} " +
-                    "bitrate=${cfg.micBitrate} echo=${cfg.micEchoCanceler} noise=${cfg.micNoiseSuppressor} url=$url encoders=${opusEncoders.joinToString()}",
+                "MIC starting generation=$generation source=${cfg.micAudioSource} rate=${cfg.micSampleRate} " +
+                    "channels=${cfg.micChannels} bitrate=${cfg.micBitrate} gain=${cfg.micGainDb}dB " +
+                    "echo=${cfg.micEchoCanceler} noise=${cfg.micNoiseSuppressor} url=$url encoders=${opusEncoders.joinToString()}",
             )
             audio.startStream(url)
-            startStats()
-            updateNotification("Opus ${cfg.micSampleRate}Hz/${cfg.micChannels}ch -> MediaMTX")
+            startStats(generation)
+            updateNotification("Opus ${cfg.micSampleRate}Hz/${cfg.micChannels}ch +${cfg.micGainDb}dB -> MediaMTX")
         } catch (t: Throwable) {
-            RoverRuntimeState.log("MIC startup failure: ${t.stackTraceToString()}")
+            if (generation != activeGeneration) return
+            RoverRuntimeState.log("MIC startup failure generation=$generation: ${t.stackTraceToString()}")
             MicRuntimeState.markStopped("Microphone startup failed", t.message ?: t.javaClass.simpleName)
             updateNotification("Mic failed: ${t.message ?: t.javaClass.simpleName}")
             stopPipeline(markStopped = false)
-            scheduleRestart("startup failure: ${t.message ?: t.javaClass.simpleName}")
+            scheduleRestart("startup failure: ${t.message ?: t.javaClass.simpleName}", generation)
         }
     }
 
-    private fun startStats() {
+    private fun connectCheckerFor(generation: Long): ConnectChecker = object : ConnectChecker {
+        override fun onConnectionStarted(url: String) = dispatchForGeneration(generation) {
+            MicRuntimeState.running = true
+            MicRuntimeState.connected = false
+            MicRuntimeState.state = "Connecting RTSP/TCP"
+            RoverRuntimeState.log("MIC RTSP connecting generation=$generation url=$url")
+        }
+
+        override fun onConnectionSuccess() = dispatchForGeneration(generation) {
+            restartAttempt = 0
+            MicRuntimeState.running = true
+            MicRuntimeState.setConnection(true, "Publishing Opus RTSP/TCP")
+            MicRuntimeState.lastError = ""
+            RoverRuntimeState.log("MIC RTSP connected generation=$generation")
+            updateNotification("Microphone publishing to MediaMTX")
+        }
+
+        override fun onConnectionFailed(reason: String) = dispatchForGeneration(generation) {
+            MicRuntimeState.setConnection(false, "RTSP connection failed", reason)
+            RoverRuntimeState.log("MIC RTSP connection failed generation=$generation: $reason")
+            scheduleRestart("RTSP failure: $reason", generation)
+        }
+
+        override fun onDisconnect() = dispatchForGeneration(generation) {
+            MicRuntimeState.connected = false
+            MicRuntimeState.state = "RTSP disconnected"
+            RoverRuntimeState.log("MIC RTSP disconnected generation=$generation")
+            if (!manualStop && !destroying) scheduleRestart("RTSP disconnected", generation)
+        }
+
+        override fun onAuthError() = dispatchForGeneration(generation) {
+            MicRuntimeState.setConnection(false, "RTSP auth error", "authentication rejected")
+            scheduleRestart("RTSP authentication rejected", generation)
+        }
+
+        override fun onAuthSuccess() = dispatchForGeneration(generation) {
+            RoverRuntimeState.log("MIC RTSP auth success generation=$generation")
+        }
+
+        override fun onNewBitrate(bitrate: Long) {
+            if (generation == activeGeneration) MicRuntimeState.measuredBitrate = bitrate
+        }
+    }
+
+    private fun dispatchForGeneration(generation: Long, block: () -> Unit) {
+        handler.post {
+            if (generation != activeGeneration || destroying) {
+                RoverRuntimeState.log("MIC ignoring callback from retired generation=$generation active=$activeGeneration")
+                return@post
+            }
+            runCatching(block).onFailure {
+                RoverRuntimeState.log("MIC callback failure generation=$generation: ${it.stackTraceToString()}")
+                scheduleRestart("callback failure: ${it.message ?: it.javaClass.simpleName}", generation)
+            }
+        }
+    }
+
+    private fun startStats(generation: Long) {
         statsTask?.let { handler.removeCallbacks(it) }
         var lastFrames = 0L
         var lastProgressAt = System.currentTimeMillis()
         val task = object : Runnable {
             override fun run() {
+                if (generation != activeGeneration || destroying) return
                 val audio = stream ?: return
                 val client = audio.getStreamClient()
                 val frames = client.getSentAudioFrames()
@@ -185,7 +261,7 @@ class MicPublisherService : Service(), ConnectChecker {
                 MicRuntimeState.updateStats(frames, bytes, dropped, queue)
 
                 if (MicRuntimeState.connected && System.currentTimeMillis() - lastProgressAt > 8_000L) {
-                    scheduleRestart("audio publisher made no packet progress for ${System.currentTimeMillis() - lastProgressAt}ms")
+                    scheduleRestart("audio publisher made no packet progress for ${System.currentTimeMillis() - lastProgressAt}ms", generation)
                     return
                 }
                 handler.postDelayed(this, 1_000L)
@@ -195,7 +271,8 @@ class MicPublisherService : Service(), ConnectChecker {
         handler.post(task)
     }
 
-    private fun scheduleRestart(reason: String) {
+    private fun scheduleRestart(reason: String, generation: Long) {
+        if (generation != activeGeneration) return
         if (manualStop || destroying || !RoverSettings.load(this).micEnabled || pendingRestart != null) return
         val attempt = restartAttempt++
         val delay = min(RESTART_BASE_MS * (1L shl attempt.coerceAtMost(4)), RESTART_MAX_MS)
@@ -203,11 +280,11 @@ class MicPublisherService : Service(), ConnectChecker {
         MicRuntimeState.connected = false
         MicRuntimeState.state = "Restarting microphone in ${delay}ms"
         MicRuntimeState.lastError = reason
-        RoverRuntimeState.log("MIC full pipeline restart scheduled in ${delay}ms attempt=${attempt + 1}: $reason")
+        RoverRuntimeState.log("MIC full pipeline restart scheduled generation=$generation in ${delay}ms attempt=${attempt + 1}: $reason")
         updateNotification("Mic recovering in ${delay / 1000}s")
         val task = Runnable {
             pendingRestart = null
-            if (!manualStop && !destroying && RoverSettings.load(this).micEnabled) {
+            if (generation == activeGeneration && !manualStop && !destroying && RoverSettings.load(this).micEnabled) {
                 startPipeline(forceRestart = true)
             }
         }
@@ -220,58 +297,23 @@ class MicPublisherService : Service(), ConnectChecker {
         pendingRestart = null
     }
 
+    private fun invalidateCurrentGeneration() {
+        activeGeneration = ++generationCounter
+    }
+
     private fun stopPipeline(markStopped: Boolean) {
         statsTask?.let { handler.removeCallbacks(it) }
         statsTask = null
-        amplitudeEffect?.let { runCatching { it.stop() } }
-        amplitudeEffect = null
-        stream?.let { audio ->
-            runCatching { if (audio.isStreaming) audio.stopStream() }
-        }
+        val old = stream
         stream = null
+        if (old != null) {
+            runCatching {
+                if (old.isStreaming) old.stopStream()
+            }.onFailure {
+                RoverRuntimeState.log("MIC teardown failure ignored: ${it.stackTraceToString()}")
+            }
+        }
         if (markStopped) MicRuntimeState.markStopped()
-    }
-
-    override fun onConnectionStarted(url: String) {
-        MicRuntimeState.running = true
-        MicRuntimeState.connected = false
-        MicRuntimeState.state = "Connecting RTSP/TCP"
-        RoverRuntimeState.log("MIC RTSP connecting url=$url")
-    }
-
-    override fun onConnectionSuccess() {
-        restartAttempt = 0
-        MicRuntimeState.running = true
-        MicRuntimeState.setConnection(true, "Publishing Opus RTSP/TCP")
-        MicRuntimeState.lastError = ""
-        RoverRuntimeState.log("MIC RTSP connected")
-        updateNotification("Microphone publishing to MediaMTX")
-    }
-
-    override fun onConnectionFailed(reason: String) {
-        MicRuntimeState.setConnection(false, "RTSP connection failed", reason)
-        RoverRuntimeState.log("MIC RTSP connection failed: $reason")
-        scheduleRestart("RTSP failure: $reason")
-    }
-
-    override fun onDisconnect() {
-        MicRuntimeState.connected = false
-        MicRuntimeState.state = "RTSP disconnected"
-        RoverRuntimeState.log("MIC RTSP disconnected")
-        if (!manualStop && !destroying) scheduleRestart("RTSP disconnected")
-    }
-
-    override fun onAuthError() {
-        MicRuntimeState.setConnection(false, "RTSP auth error", "authentication rejected")
-        scheduleRestart("RTSP authentication rejected")
-    }
-
-    override fun onAuthSuccess() {
-        RoverRuntimeState.log("MIC RTSP auth success")
-    }
-
-    override fun onNewBitrate(bitrate: Long) {
-        MicRuntimeState.measuredBitrate = bitrate
     }
 
     @Suppress("DEPRECATION")
@@ -313,6 +355,7 @@ class MicPublisherService : Service(), ConnectChecker {
         destroying = true
         manualStop = true
         cancelRestart()
+        invalidateCurrentGeneration()
         stopPipeline(markStopped = true)
         RoverRuntimeState.log("MIC publisher service stopped")
         super.onDestroy()
