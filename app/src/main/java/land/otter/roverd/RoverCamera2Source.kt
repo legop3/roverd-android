@@ -52,12 +52,12 @@ class RoverCamera2Source(
 
     override fun isRunning(): Boolean = camera.isRunning
 
-    // StreamBase's default orientation behavior is designed for normal phone UI preview/rotation.
-    // A rover camera is a fixed appliance. Keep the source neutral and let the streamer rotate only
-    // the final output pixels inside a fixed landscape H.264 canvas.
+    // Preserve the orientation state that StreamBase derives from prepareVideo(rotation=...).
+    // This custom source exists only so roverd can select an exact Camera2 ID; it should not invent
+    // a second geometry model on top of RootEncoder.
     override fun getOrientationConfig(): OrientationConfig = OrientationConfig(
-        cameraOrientation = 0,
-        isPortrait = false,
+        cameraOrientation = if (rotation == 0) 270 else rotation - 90,
+        isPortrait = rotation == 90 || rotation == 270,
         forced = OrientationForced.NONE,
     )
 
