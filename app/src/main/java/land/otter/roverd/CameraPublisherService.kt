@@ -16,6 +16,7 @@ class CameraPublisherService : Service() {
         private const val CHANNEL_ID = "roverd-camera"
         private const val NOTIFICATION_ID = 2
 
+        const val ACTION_START = "camera_start"
         const val ACTION_RESTART = "camera_restart"
         const val ACTION_STOP = "camera_stop"
     }
@@ -25,8 +26,7 @@ class CameraPublisherService : Service() {
     override fun onCreate() {
         super.onCreate()
         RoverRuntimeState.initialize(this)
-        promoteToForeground("Starting camera publisher")
-        startPipeline()
+        promoteToForeground("Camera publisher ready")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -37,14 +37,23 @@ class CameraPublisherService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_RESTART -> {
-                RoverRuntimeState.log("CAMERA manual restart requested")
-                startPipeline()
+                RoverRuntimeState.log("CAMERA restart requested")
+                startPipeline(forceRestart = true)
+            }
+            ACTION_START, null -> {
+                if (streamer == null) {
+                    RoverRuntimeState.log("CAMERA start requested")
+                    startPipeline(forceRestart = false)
+                } else {
+                    RoverRuntimeState.log("CAMERA start ignored; pipeline already running")
+                }
             }
         }
         return START_STICKY
     }
 
-    private fun startPipeline() {
+    private fun startPipeline(forceRestart: Boolean) {
+        if (!forceRestart && streamer != null) return
         streamer?.close()
         streamer = null
         RoverRuntimeState.resetCameraCounters()
