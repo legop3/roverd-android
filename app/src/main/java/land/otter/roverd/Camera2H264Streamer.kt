@@ -5,15 +5,18 @@ import android.content.Context
 import android.os.Build
 import android.view.Surface
 import android.view.WindowManager
+import com.pedro.encoder.input.sources.OrientationForced
 import com.pedro.encoder.input.video.CameraCallbacks
 import com.pedro.encoder.input.video.CameraHelper
 import com.pedro.encoder.utils.CodecUtil
+import com.pedro.encoder.utils.ViewPort
 import com.pedro.library.view.GlStreamInterface
 import java.io.Closeable
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 @TargetApi(21)
 class Camera2H264Streamer(
@@ -180,19 +183,54 @@ class Camera2H264Streamer(
 
     private fun normalizeRotation(value: Int): Int = (((value % 360) + 360) % 360 / 90) * 90
 
+    /**
+     * RootEncoder's built-in "portrait" encoder viewport is intentionally a narrow portrait area
+     * inside the encoder surface. That behavior is useful for portrait phone streaming but is the
+     * exact opposite of what a rover camera needs: it produced a vertical image inside a landscape
+     * H.264 frame.
+     *
+     * Keep every piece of orientation state landscape. For 90/270 degree pixel rotations, use an
+     * oversized centered viewport whose aspect ratio matches the rotated source. GLES clips the
+     * excess outside the encoder surface, giving us a center-crop/fill result with no stretching
+     * and no portrait canvas.
+     */
     private fun applyFixedLandscapeGeometry(roverStream: RoverH264Stream, orientation: OrientationPlan) {
         val gl = roverStream.getGlInterface() as? GlStreamInterface ?: return
+        val quarterTurn = orientation.pixelRotation == 90 || orientation.pixelRotation == 270
+        val viewPort = centerCropLandscapeViewPort(quarterTurn)
+
         gl.autoHandleOrientation = false
-        // RoverCamera2Source neutralizes the Camera2 source orientation. Rotate only the final image.
+        gl.forceOrientation(OrientationForced.LANDSCAPE)
         gl.setRotation(0)
         gl.setEncoderSize(outputWidth, outputHeight)
+        gl.setStreamIsPortrait(false)
         gl.setStreamRotation(orientation.pixelRotation)
-        // This tells RootEncoder's viewport calculator to preserve aspect ratio on quarter-turns.
-        gl.setStreamIsPortrait(orientation.pixelRotation == 90 || orientation.pixelRotation == 270)
+        gl.setStreamViewPort(viewPort)
+
         RoverRuntimeState.log(
             "CAMERA geometry canvas=${outputWidth}x${outputHeight} pixelRotation=${orientation.pixelRotation} " +
-                "quarterTurn=${orientation.pixelRotation == 90 || orientation.pixelRotation == 270}",
+                "portrait=false viewport=${viewPort.x},${viewPort.y} ${viewPort.width}x${viewPort.height} " +
+                "mode=${if (quarterTurn) "quarter-turn center-crop" else "full landscape"}",
         )
+    }
+
+    private fun centerCropLandscapeViewPort(quarterTurn: Boolean): ViewPort {
+        if (!quarterTurn) return ViewPort(0, 0, outputWidth, outputHeight)
+
+        val destinationAspect = outputWidth.toFloat() / outputHeight.toFloat()
+        val rotatedSourceAspect = outputHeight.toFloat() / outputWidth.toFloat()
+
+        return if (rotatedSourceAspect > destinationAspect) {
+            // Rotated source is wider than the landscape canvas: fill height and crop the sides.
+            val height = outputHeight
+            val width = (height * rotatedSourceAspect).roundToInt().coerceAtLeast(outputWidth)
+            ViewPort((outputWidth - width) / 2, 0, width, height)
+        } else {
+            // Normal phone-camera case: rotated source is taller. Fill width and crop top/bottom.
+            val width = outputWidth
+            val height = (width / rotatedSourceAspect).roundToInt().coerceAtLeast(outputHeight)
+            ViewPort(0, (outputHeight - height) / 2, width, height)
+        }
     }
 
     private fun startStatsThread() {
