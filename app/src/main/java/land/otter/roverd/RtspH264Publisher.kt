@@ -125,42 +125,63 @@ class RtspH264Publisher(
         socket = s
         input = BufferedInputStream(s.getInputStream())
         output = BufferedOutputStream(s.getOutputStream())
+        sessionId = null
 
         var cseq = 1
-        val sdp = buildSdp(sps, pps)
+
         request(
+            method = "OPTIONS",
+            url = publishUrl,
+            cseq = cseq++,
+        ).require2xx("OPTIONS")
+
+        val sdp = buildSdp(sps, pps)
+        val announce = request(
             method = "ANNOUNCE",
             url = publishUrl,
             cseq = cseq++,
             headers = mapOf("Content-Type" to "application/sdp"),
             body = sdp,
-        ).require2xx("ANNOUNCE")
+        )
+        announce.require2xx("ANNOUNCE")
+        updateSessionFrom(announce)
 
         val trackUrl = publishUrl.trimEnd('/') + "/trackID=0"
+        val setupHeaders = linkedMapOf(
+            "Transport" to "RTP/AVP/TCP;unicast;interleaved=0-1;mode=record",
+        )
+        sessionId?.let { setupHeaders["Session"] = it }
         val setup = request(
             method = "SETUP",
             url = trackUrl,
             cseq = cseq++,
-            headers = mapOf("Transport" to "RTP/AVP/TCP;unicast;interleaved=0-1"),
+            headers = setupHeaders,
         )
         setup.require2xx("SETUP")
-        sessionId = setup.headers["session"]?.substringBefore(';')?.trim()
-            ?: throw IllegalStateException("RTSP SETUP response did not contain Session")
+        updateSessionFrom(setup)
+        if (sessionId.isNullOrBlank()) {
+            throw IllegalStateException("RTSP SETUP response did not contain Session")
+        }
 
         request(
             method = "RECORD",
             url = publishUrl,
             cseq = cseq,
-            headers = mapOf(
-                "Session" to sessionId!!,
-                "Range" to "npt=0.000-",
-            ),
+            headers = mapOf("Session" to sessionId!!),
         ).require2xx("RECORD")
 
         s.soTimeout = 0
         connected = true
         RoverRuntimeState.setCameraPublisherState(true, "Publishing RTSP/TCP", "")
         RoverRuntimeState.log("CAMERA RTSP RECORD active session=$sessionId")
+    }
+
+    private fun updateSessionFrom(response: RtspResponse) {
+        response.headers["session"]
+            ?.substringBefore(';')
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { sessionId = it }
     }
 
     private fun request(
@@ -180,10 +201,22 @@ class RtspH264Publisher(
             if (bytes.isNotEmpty()) append("Content-Length: ").append(bytes.size).append("\r\n")
             append("\r\n")
         }
+        RoverRuntimeState.log(
+            "CAMERA RTSP -> $method cseq=$cseq url=$url" +
+                if (headers.isEmpty()) "" else " headers=${headers.entries.joinToString(";") { "${it.key}=${it.value}" }}",
+        )
         out.write(text.toByteArray(Charsets.US_ASCII))
         if (bytes.isNotEmpty()) out.write(bytes)
         out.flush()
-        return readResponse()
+        val response = readResponse()
+        val usefulHeaders = listOf("session", "transport", "public", "server")
+            .mapNotNull { key -> response.headers[key]?.let { "$key=$it" } }
+            .joinToString(";")
+        RoverRuntimeState.log(
+            "CAMERA RTSP <- $method ${response.statusLine}" +
+                if (usefulHeaders.isEmpty()) "" else " headers=$usefulHeaders",
+        )
+        return response
     }
 
     private fun readResponse(): RtspResponse {
