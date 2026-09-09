@@ -118,6 +118,8 @@ class MainActivity : Activity() {
         requestNotificationPermission()
         startRoverService()
         startConfiguredCameraIfPossible()
+        startConfiguredMicIfPossible()
+        startConfiguredAudioPlayback()
         requestBatteryOptimizationExemption(userInitiated = false)
     }
 
@@ -385,12 +387,7 @@ class MainActivity : Activity() {
 
     private fun buildMicPage(): View = MicSettingsView(this)
 
-    private fun buildAudioPage(): View = scrollPage { root, _ ->
-        pageTitle(root, "AUDIO PLAYBACK / TTS / HORN")
-        root.addView(diagnosticText(12f).apply {
-            text = "NOT IMPLEMENTED YET\n\nReverse audio forwarding, output route, AudioTrack buffers/underruns, TTS engine/voice, horn controls, and playback errors will live on this page."
-        })
-    }
+    private fun buildAudioPage(): View = AudioSettingsView(this)
 
     private fun buildLogPage(): View = scrollPage { root, pad ->
         pageTitle(root, "LOG / CRASH OUTPUT")
@@ -834,6 +831,10 @@ class MainActivity : Activity() {
             appendLine("=== MIC ===")
             appendLine(MicRuntimeState.snapshot())
             appendLine()
+            appendLine("=== AUDIO ===")
+            appendLine(AudioPlaybackRuntimeState.snapshot())
+            appendLine(RoverAudioController.snapshot())
+            appendLine()
             appendLine("=== LOG ===")
             append(RoverRuntimeState.logSnapshot())
         }
@@ -873,6 +874,25 @@ class MainActivity : Activity() {
         startCameraPublisher()
     }
 
+    private fun startConfiguredMicIfPossible() {
+        val cfg = RoverSettings.load(this)
+        if (!cfg.micEnabled) return
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            RoverRuntimeState.log("MIC autostart waiting for RECORD_AUDIO permission")
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), MicSettingsView.MIC_PERMISSION_REQUEST)
+            return
+        }
+        RoverRuntimeState.log("MIC autostart from saved enabled setting")
+        startServiceCompat(Intent(this, MicPublisherService::class.java).setAction(MicPublisherService.ACTION_START))
+    }
+
+    private fun startConfiguredAudioPlayback() {
+        val cfg = RoverSettings.load(this)
+        if (!cfg.audioPlaybackEnabled) return
+        RoverRuntimeState.log("AUDIO reverse playback autostart from saved enabled setting")
+        startServiceCompat(Intent(this, AudioPlaybackService::class.java).setAction(AudioPlaybackService.ACTION_START))
+    }
+
     private fun startServiceCompat(intent: Intent) {
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent)
         else startService(intent)
@@ -903,12 +923,21 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == CAMERA_PERMISSION_REQUEST) {
-            val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
-            RoverRuntimeState.log("CAMERA permission result=$granted")
-            refreshCameraSummary()
-            refreshCameraList()
-            if (granted && RoverSettings.load(this).cameraEnabled) startCameraPublisher()
+        when (requestCode) {
+            CAMERA_PERMISSION_REQUEST -> {
+                val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+                RoverRuntimeState.log("CAMERA permission result=$granted")
+                refreshCameraSummary()
+                refreshCameraList()
+                if (granted && RoverSettings.load(this).cameraEnabled) startCameraPublisher()
+            }
+            MicSettingsView.MIC_PERMISSION_REQUEST -> {
+                val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+                RoverRuntimeState.log("MIC permission result=$granted")
+                if (granted && RoverSettings.load(this).micEnabled) {
+                    startServiceCompat(Intent(this, MicPublisherService::class.java).setAction(MicPublisherService.ACTION_START))
+                }
+            }
         }
     }
 
