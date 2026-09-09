@@ -210,6 +210,21 @@ object RoverRuntimeState {
         if (error.isNotEmpty()) cameraLastError = error
     }
 
+    fun setCameraLibraryCounters(sentFrames: Long, sentBytes: Long, droppedFrames: Long) {
+        val now = System.currentTimeMillis()
+        if (sentFrames > cameraPublishedFrames) {
+            lastCameraPublishedAtMs = now
+            lastCameraEncodedAtMs = now
+        }
+        cameraPublishedFrames = sentFrames.coerceAtLeast(0)
+        cameraPublishedBytes = sentBytes.coerceAtLeast(0)
+        // RootEncoder owns encoding and transport internally, so use its sent-frame counters
+        // for the encoded counters too instead of inventing an inaccessible queue metric.
+        cameraEncodedFrames = cameraPublishedFrames
+        cameraEncodedBytes = cameraPublishedBytes
+        cameraDroppedFrames = droppedFrames.coerceAtLeast(0)
+    }
+
     fun recordCameraEncodedFrame(bytes: Int, keyFrame: Boolean) {
         cameraEncodedFrames += 1
         cameraEncodedBytes += bytes
