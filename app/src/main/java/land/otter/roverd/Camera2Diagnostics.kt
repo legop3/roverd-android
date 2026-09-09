@@ -31,10 +31,7 @@ object Camera2Diagnostics {
                     ?.maxByOrNull { it.width.toLong() * it.height.toLong() }
                 val lens = if (focal.isBlank()) "focal ?" else "${focal}mm"
                 val size = largest?.let { "max ${it.width}x${it.height}" } ?: "size ?"
-                CameraChoice(
-                    id,
-                    "ID $id — $facing — $lens — $size",
-                )
+                CameraChoice(id, "ID $id — $facing — $lens — $size")
             }
         }.getOrElse { emptyList() }
     }
@@ -56,15 +53,22 @@ object Camera2Diagnostics {
             val encodableSizes = rawSizes.filter { size ->
                 encoders.any { info -> supportsAvcSize(info, size.width, size.height) }
             }
-            // Some vendor codecs report incomplete VideoCapabilities. Never make the camera unusable
-            // just because its codec metadata is broken; fall back to the raw SurfaceTexture list.
+            // Vendor codec metadata is not always complete. Keep the camera usable if every codec
+            // incorrectly reports false by falling back to the raw SurfaceTexture modes.
             val sizes = encodableSizes.ifEmpty { rawSizes }
 
-            val fps = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-                ?.map { CameraFpsOption(it.lower, it.upper) }
-                ?.distinctBy { it.min to it.max }
-                ?.sortedWith(compareBy<CameraFpsOption> { it.max }.thenBy { it.min })
+            val rawFpsRanges = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                ?.toList()
                 .orEmpty()
+            // RootEncoder 2.7.x accepts one target FPS and internally chooses an AE range whose
+            // ceiling matches it. The normal settings menu should therefore expose real target FPS
+            // values, while the complete raw ranges remain visible in RAW INVENTORY.
+            val fps = rawFpsRanges
+                .map { it.upper }
+                .distinct()
+                .sorted()
+                .map { CameraFpsOption(it, it) }
+
             val exposureRange = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
             val exposureStep = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
             val effects = c.get(CameraCharacteristics.CONTROL_AVAILABLE_EFFECTS)
@@ -86,7 +90,13 @@ object Camera2Diagnostics {
         }.getOrNull()
     }
 
-    fun h264SurfaceEncoders(): List<String> = h264SurfaceEncoderInfos().map { it.name }.distinct()
+    /**
+     * Values used by the normal CAMERA settings spinner. RootEncoder selects the concrete codec,
+     * so claiming that an exact codec name can be forced here would be misleading.
+     */
+    fun h264SurfaceEncoders(): List<String> = listOf("HARDWARE", "SOFTWARE", "CBR_PRIORITY")
+
+    private fun rawH264SurfaceEncoderNames(): List<String> = h264SurfaceEncoderInfos().map { it.name }.distinct()
 
     private fun h264SurfaceEncoderInfos(): List<MediaCodecInfo> = runCatching {
         MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
@@ -114,7 +124,7 @@ object Camera2Diagnostics {
             appendLine("camera count   : ${ids.size}")
             appendLine("NOTE           : Camera IDs are opaque Android identifiers, not lens numbers or zoom factors.")
             appendLine("NOTE           : SENSOR_ORIENTATION is sensor mounting metadata, not a stream-rotation command.")
-            appendLine("H264 encoders  : ${h264SurfaceEncoders().joinToString().ifBlank { "(none reported)" }}")
+            appendLine("H264 encoders  : ${rawH264SurfaceEncoderNames().joinToString().ifBlank { "(none reported)" }}")
 
             for (id in ids) {
                 appendLine()
