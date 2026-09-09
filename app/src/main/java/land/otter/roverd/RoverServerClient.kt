@@ -88,6 +88,13 @@ class RoverServerClient(
             .put("initialOn", false)
             .put("activeLow", false)
 
+        val headlight = JSONObject()
+            .put("enabled", HeadlightController.isAvailable())
+            .put("gpioPin", -1)
+            .put("gpioChip", "android-camera-torch")
+            .put("initialOn", HeadlightController.isOn())
+            .put("activeLow", false)
+
         val video = JSONObject().put("enabled", config.cameraEnabled)
         if (config.cameraEnabled) {
             runCatching {
@@ -159,7 +166,7 @@ class RoverServerClient(
                 .put("volume", config.hornVolume)
                 .put("sampleRate", 48_000)
                 .put("channels", 1))
-            .put("headlight", disabledToggle)
+            .put("headlight", headlight)
             .put("laser", JSONObject(disabledToggle.toString()))
             .put("private", JSONObject().put("enabled", false))
             .put("platform", JSONObject()
@@ -257,6 +264,10 @@ class RoverServerClient(
             }
             msg.has("audioLevels") -> {
                 RoverAudioController.handleAudioLevels(msg.getJSONObject("audioLevels"))
+            }
+            msg.has("headlight") -> {
+                val action = msg.getJSONObject("headlight").optString("action", "toggle")
+                HeadlightController.handleAction(action, config.cameraId)
             }
             else -> throw UnsupportedOperationException("Unsupported command type: ${msg.optString("type", "unknown")}")
         }
