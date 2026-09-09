@@ -383,12 +383,7 @@ class MainActivity : Activity() {
         }.also { root.addView(it) }
     }
 
-    private fun buildMicPage(): View = scrollPage { root, _ ->
-        pageTitle(root, "MIC / AUDIO CAPTURE")
-        root.addView(diagnosticText(12f).apply {
-            text = "NOT IMPLEMENTED YET\n\nMicrophone selection/source, capture format, levels, encoder state, packet counters, and capture errors will live on this page."
-        })
-    }
+    private fun buildMicPage(): View = MicSettingsView(this)
 
     private fun buildAudioPage(): View = scrollPage { root, _ ->
         pageTitle(root, "AUDIO PLAYBACK / TTS / HORN")
@@ -835,6 +830,9 @@ class MainActivity : Activity() {
             appendLine(cameraSummarySnapshot())
             appendLine(cameraRuntimeSnapshot())
             appendLine(cameraInventory)
+            appendLine()
+            appendLine("=== MIC ===")
+            appendLine(MicRuntimeState.snapshot())
             appendLine()
             appendLine("=== LOG ===")
             append(RoverRuntimeState.logSnapshot())
