@@ -84,6 +84,7 @@ enum class BrcLine { RTS, DTR }
 
 object RoverSettings {
     private const val PREFS = "roverd"
+    private const val DEFAULT_SERVER_URL = "ws://control-server.local:8080/rover"
     private val HEX_COLOR = Regex("^#[0-9A-Fa-f]{6}$")
 
     fun normalizeColor(raw: String): String {
@@ -111,7 +112,7 @@ object RoverSettings {
             name = p.getString("name", "android-rover") ?: "android-rover",
             description = p.getString("description", "Android phone rover") ?: "Android phone rover",
             color = runCatching { normalizeColor(p.getString("color", "#4DB6AC") ?: "#4DB6AC") }.getOrDefault("#4DB6AC"),
-            serverUrl = p.getString("serverUrl", "wss://rover.otter.land/rover") ?: "wss://rover.otter.land/rover",
+            serverUrl = p.getString("serverUrl", DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL,
             mediaRtspPort = mediaRtspPort,
             baud = p.getInt("baud", 115200),
             usbSerialPreference = p.getString("usbSerialPreference", "AUTO") ?: "AUTO",
