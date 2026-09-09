@@ -17,6 +17,7 @@ class RoverService : Service() {
         private const val NOTIFICATION_ID = 1
 
         const val ACTION_RESTART = "restart"
+        const val ACTION_RECOVER_ALL = "recover_all"
         const val ACTION_RECONNECT_SERVER = "reconnect_server"
         const val ACTION_RECONNECT_USB = "reconnect_usb"
         const val ACTION_RESTART_SENSOR_STREAM = "restart_sensor_stream"
@@ -85,10 +86,40 @@ class RoverService : Service() {
     private fun startServer(config: RoverConfig = RoverSettings.load(this)) {
         stopServer()
         server = RoverServerClient(
+            context = this,
             config = config,
             roombaProvider = { roomba },
             onStatus = ::status,
         ).also { it.start() }
+    }
+
+    private fun recoverAllRuntime() {
+        RoverRuntimeState.log("RECOVERY restarting rover runtime and all configured media pipelines")
+        startRuntime()
+        val cfg = RoverSettings.load(this)
+
+        if (cfg.cameraEnabled && Build.VERSION.SDK_INT >= 21) {
+            startServiceCompat(Intent(this, CameraPublisherService::class.java).setAction(CameraPublisherService.ACTION_RESTART))
+        } else {
+            stopService(Intent(this, CameraPublisherService::class.java))
+        }
+
+        if (cfg.micEnabled) {
+            startServiceCompat(Intent(this, MicPublisherService::class.java).setAction(MicPublisherService.ACTION_RESTART))
+        } else {
+            stopService(Intent(this, MicPublisherService::class.java))
+        }
+
+        if (cfg.audioPlaybackEnabled) {
+            startServiceCompat(Intent(this, AudioPlaybackService::class.java).setAction(AudioPlaybackService.ACTION_RESTART))
+        } else {
+            stopService(Intent(this, AudioPlaybackService::class.java))
+        }
+        status("Full rover runtime recovered")
+    }
+
+    private fun startServiceCompat(intent: Intent) {
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
     }
 
     @Suppress("DEPRECATION")
@@ -201,6 +232,7 @@ class RoverService : Service() {
                 RoverRuntimeState.log("MANUAL full rover runtime restart")
                 startRuntime()
             }
+            ACTION_RECOVER_ALL -> recoverAllRuntime()
             ACTION_RECONNECT_SERVER -> {
                 RoverRuntimeState.log("MANUAL rover WebSocket reconnect")
                 startServer()
