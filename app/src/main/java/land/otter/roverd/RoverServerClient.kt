@@ -89,10 +89,10 @@ class RoverServerClient(
             .put("activeLow", false)
 
         val headlight = JSONObject()
-            .put("enabled", HeadlightController.isAvailable())
+            .put("enabled", config.headlightEnabled && HeadlightController.isAvailable())
             .put("gpioPin", -1)
             .put("gpioChip", "android-camera-torch")
-            .put("initialOn", HeadlightController.isOn())
+            .put("initialOn", config.headlightInitialOn)
             .put("activeLow", false)
 
         val video = JSONObject().put("enabled", config.cameraEnabled)
@@ -140,15 +140,34 @@ class RoverServerClient(
             }
         }
 
+        val safety = config.privateSafety
+        val privateConfig = JSONObject()
+            .put("enabled", config.privateEnabled)
+            .put("safety", JSONObject()
+                .put("speedLimitEnabled", safety.speedLimitEnabled)
+                .put("speedLimitMaxWheelSpeed", safety.speedLimitMaxWheelSpeed)
+                .put("hardOvercurrentEnabled", safety.hardOvercurrentEnabled)
+                .put("overcurrentStopMs", safety.overcurrentStopMs)
+                .put("hardBumpEnabled", safety.hardBumpEnabled)
+                .put("bumpBackoffSpeed", safety.bumpBackoffSpeed)
+                .put("bumpBackoffMs", safety.bumpBackoffMs)
+                .put("cliffEnabled", safety.cliffEnabled)
+                .put("cliffBackoffSpeed", safety.cliffBackoffSpeed)
+                .put("cliffBackoffMs", safety.cliffBackoffMs)
+                .put("virtualWallEnabled", safety.virtualWallEnabled)
+                .put("virtualWallBackoffSpeed", safety.virtualWallBackoffSpeed)
+                .put("virtualWallBackoffMs", safety.virtualWallBackoffMs)
+                .put("triggerCooldownMs", safety.triggerCooldownMs))
+
         val hello = JSONObject()
             .put("type", "hello")
             .put("name", config.name)
-            .put("description", "Android phone rover")
-            .put("color", "#4DB6AC")
+            .put("description", config.description)
+            .put("color", config.color)
             .put("battery", JSONObject()
-                .put("full", 2068)
-                .put("warn", 1700)
-                .put("urgent", 1650))
+                .put("full", config.batteryFull)
+                .put("warn", config.batteryWarn)
+                .put("urgent", config.batteryUrgent))
             .put("maxWheelSpeed", config.maxWheelSpeed)
             .put("media", JSONObject()
                 .put("manage", false)
@@ -168,13 +187,14 @@ class RoverServerClient(
                 .put("channels", 1))
             .put("headlight", headlight)
             .put("laser", JSONObject(disabledToggle.toString()))
-            .put("private", JSONObject().put("enabled", false))
+            .put("private", privateConfig)
             .put("platform", JSONObject()
                 .put("type", "android")
                 .put("appVersion", "0.1.0")
+                .put("usbSerialPreference", config.usbSerialPreference)
                 .put("usbSerialConnected", roombaProvider()?.isConnected() == true))
 
-        RoverRuntimeState.log("WS hello=${hello.toString().take(2000)}")
+        RoverRuntimeState.log("WS hello=${hello.toString().take(4000)}")
         ws.send(hello.toString())
     }
 
@@ -256,16 +276,11 @@ class RoverServerClient(
                 RoverRuntimeState.log("CMD song slot=$slot notes=${notes.size} loop=${p.optBoolean("loop", false)}")
                 connectedRoomba().playSong(slot, notes)
             }
-            msg.has("tts") -> {
-                RoverAudioController.handleTts(msg.getJSONObject("tts"))
-            }
-            msg.has("horn") -> {
-                RoverAudioController.handleHorn(msg.getJSONObject("horn"))
-            }
-            msg.has("audioLevels") -> {
-                RoverAudioController.handleAudioLevels(msg.getJSONObject("audioLevels"))
-            }
+            msg.has("tts") -> RoverAudioController.handleTts(msg.getJSONObject("tts"))
+            msg.has("horn") -> RoverAudioController.handleHorn(msg.getJSONObject("horn"))
+            msg.has("audioLevels") -> RoverAudioController.handleAudioLevels(msg.getJSONObject("audioLevels"))
             msg.has("headlight") -> {
+                if (!config.headlightEnabled) throw IllegalStateException("headlight disabled")
                 val action = msg.getJSONObject("headlight").optString("action", "toggle")
                 HeadlightController.handleAction(action, config.cameraId)
             }
