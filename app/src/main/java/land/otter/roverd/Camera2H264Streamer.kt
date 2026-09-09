@@ -1,12 +1,15 @@
 package land.otter.roverd
 
+import android.annotation.TargetApi
 import android.content.Context
-import android.graphics.ImageFormat
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
@@ -22,6 +25,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
+@TargetApi(21)
 class Camera2H264Streamer(
     context: Context,
     private val config: RoverConfig,
@@ -36,10 +40,15 @@ class Camera2H264Streamer(
     private var captureSession: CameraCaptureSession? = null
     private var encoder: MediaCodec? = null
     private var encoderSurface: Surface? = null
+    private var glBridge: CameraGlBridge? = null
     private var drainThread: Thread? = null
     private var publisher: RtspH264Publisher? = null
-    private var selectedSize: Size? = null
+    private var selectedCaptureSize: Size? = null
+    private var selectedOutputSize: Size? = null
+    private var selectedRotation: Int = 0
+    private var selectedFpsRange: Range<Int>? = null
     private var lastKeyFrameRequestMs = 0L
+    private var lastCaptureLogMs = 0L
 
     fun start() {
         check(!closed.get()) { "Camera streamer is closed" }
@@ -48,40 +57,59 @@ class Camera2H264Streamer(
             "Camera ID ${config.cameraId} not found. Available=${ids.joinToString(",")}" 
         }
         val chars = cameraManager.getCameraCharacteristics(config.cameraId)
-        selectedSize = chooseSize(chars, config.cameraWidth, config.cameraHeight)
-        val size = selectedSize!!
-        val encoderName = chooseEncoderName()
+        selectedCaptureSize = chooseSize(chars, config.cameraWidth, config.cameraHeight)
+        val captureSize = selectedCaptureSize!!
+        selectedRotation = resolveRotation(chars)
+        val outputSize = if (selectedRotation == 90 || selectedRotation == 270) {
+            Size(captureSize.height, captureSize.width)
+        } else {
+            captureSize
+        }
+        selectedOutputSize = outputSize
+        selectedFpsRange = chooseFpsRange(chars)
+        val encoderName = chooseEncoderName(outputSize)
         RoverRuntimeState.log(
-            "CAMERA start id=${config.cameraId} requested=${config.cameraWidth}x${config.cameraHeight}@${config.cameraFps} " +
-                "actual=${size.width}x${size.height} bitrate=${config.cameraBitrate} encoder=$encoderName",
+            "CAMERA start id=${config.cameraId} capture=${captureSize.width}x${captureSize.height} " +
+                "output=${outputSize.width}x${outputSize.height} rotation=$selectedRotation " +
+                "fps=${selectedFpsRange ?: "auto"} exposureComp=${config.cameraExposureCompensation} " +
+                "bitrate=${config.cameraBitrate} encoder=$encoderName",
         )
         RoverRuntimeState.setCameraPipelineState(
             running = false,
             state = "Configuring encoder",
             cameraId = config.cameraId,
             encoderName = encoderName,
-            width = size.width,
-            height = size.height,
-            fps = config.cameraFps,
+            width = outputSize.width,
+            height = outputSize.height,
+            fps = selectedFpsRange?.upper ?: config.cameraFps,
             bitrate = config.cameraBitrate,
             publishUrl = MediaUrl.videoPublishUrl(config),
             error = "",
         )
 
-        val codec = createConfiguredEncoder(encoderName, size)
+        val codec = createConfiguredEncoder(encoderName, outputSize)
         encoder = codec
         encoderSurface = codec.createInputSurface()
         codec.start()
 
+        glBridge = CameraGlBridge(
+            inputWidth = captureSize.width,
+            inputHeight = captureSize.height,
+            outputWidth = outputSize.width,
+            outputHeight = outputSize.height,
+            rotationDegrees = selectedRotation,
+            outputSurface = encoderSurface!!,
+        )
+
         publisher = RtspH264Publisher(MediaUrl.videoPublishUrl(config))
         startDrainThread(codec)
-        openCamera(chars, encoderSurface!!)
+        openCamera(chars, glBridge!!.cameraSurface)
     }
 
     private fun chooseSize(chars: CameraCharacteristics, requestedWidth: Int, requestedHeight: Int): Size {
         val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             ?: return Size(requestedWidth.coerceAtLeast(16), requestedHeight.coerceAtLeast(16))
-        val sizes = map.getOutputSizes(MediaCodec::class.java)?.toList().orEmpty()
+        val sizes = map.getOutputSizes(SurfaceTexture::class.java)?.toList().orEmpty()
         if (sizes.isEmpty()) return Size(requestedWidth.coerceAtLeast(16), requestedHeight.coerceAtLeast(16))
         sizes.firstOrNull { it.width == requestedWidth && it.height == requestedHeight }?.let { return it }
 
@@ -94,8 +122,14 @@ class Camera2H264Streamer(
         } ?: sizes.first()
     }
 
-    private fun chooseEncoderName(): String {
-        val codecs = MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
+    private fun resolveRotation(chars: CameraCharacteristics): Int {
+        val requested = config.cameraRotation
+        val raw = if (requested < 0) chars.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0 else requested
+        return (((raw % 360) + 360) % 360 / 90) * 90
+    }
+
+    private fun availableEncoders(): List<MediaCodecInfo> =
+        MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
             .filter { it.isEncoder && it.supportedTypes.any { type -> type.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } }
             .filter { info ->
                 runCatching {
@@ -103,10 +137,27 @@ class Camera2H264Streamer(
                         .colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 }.getOrDefault(false)
             }
+
+    private fun chooseEncoderName(size: Size): String {
+        val codecs = availableEncoders()
         if (codecs.isEmpty()) throw IllegalStateException("No H.264 encoder with Surface input")
         val names = codecs.map { it.name }
         RoverRuntimeState.log("CAMERA H264 encoders=${names.joinToString(",")}")
-        return codecs.minByOrNull { softwarePenalty(it.name) }!!.name
+
+        if (!config.cameraEncoderName.equals("AUTO", true)) {
+            val explicit = codecs.firstOrNull { it.name == config.cameraEncoderName }
+                ?: throw IllegalStateException("Configured H.264 encoder not found: ${config.cameraEncoderName}")
+            return explicit.name
+        }
+
+        return codecs.minByOrNull { info ->
+            val software = softwarePenalty(info.name)
+            val sizePenalty = runCatching {
+                val caps = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities
+                if (caps.isSizeSupported(size.width, size.height)) 0 else 10_000
+            }.getOrDefault(0)
+            software + sizePenalty
+        }!!.name
     }
 
     private fun softwarePenalty(name: String): Int {
@@ -115,29 +166,21 @@ class Camera2H264Streamer(
     }
 
     private fun createConfiguredEncoder(name: String, size: Size): MediaCodec {
-        fun configure(includeProfile: Boolean): MediaCodec {
-            val codec = MediaCodec.createByCodecName(name)
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, size.width, size.height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_BIT_RATE, config.cameraBitrate.coerceAtLeast(64_000))
-                setInteger(MediaFormat.KEY_FRAME_RATE, config.cameraFps.coerceIn(1, 120))
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 4)
-                if (includeProfile) {
-                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-                }
-            }
-            try {
-                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                return codec
-            } catch (t: Throwable) {
-                runCatching { codec.release() }
-                throw t
-            }
+        val codec = MediaCodec.createByCodecName(name)
+        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, size.width, size.height).apply {
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_BIT_RATE, config.cameraBitrate.coerceAtLeast(64_000))
+            setInteger(MediaFormat.KEY_FRAME_RATE, (selectedFpsRange?.upper ?: config.cameraFps).coerceIn(1, 120))
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 4)
         }
-
-        return runCatching { configure(true) }
-            .onFailure { RoverRuntimeState.log("CAMERA baseline profile configure failed; retrying encoder default: ${it.message}") }
-            .getOrElse { configure(false) }
+        try {
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            RoverRuntimeState.log("CAMERA encoder configured name=$name format=$format")
+            return codec
+        } catch (t: Throwable) {
+            runCatching { codec.release() }
+            throw t
+        }
     }
 
     @Suppress("MissingPermission")
@@ -182,15 +225,21 @@ class Camera2H264Streamer(
                     }
                     captureSession = session
                     try {
-                        val request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                            addTarget(surface)
-                            set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-                            chooseFpsRange(chars, config.cameraFps)?.let {
-                                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it)
-                            }
-                        }.build()
-                        session.setRepeatingRequest(request, null, cameraHandler)
-                        RoverRuntimeState.setCameraPipelineState(running = true, state = "Camera + H264 running", error = "")
+                        val request = buildCaptureRequest(camera, chars, surface)
+                        session.setRepeatingRequest(
+                            request,
+                            object : CameraCaptureSession.CaptureCallback() {
+                                override fun onCaptureCompleted(
+                                    session: CameraCaptureSession,
+                                    request: CaptureRequest,
+                                    result: TotalCaptureResult,
+                                ) {
+                                    logCaptureState(result)
+                                }
+                            },
+                            cameraHandler,
+                        )
+                        RoverRuntimeState.setCameraPipelineState(running = true, state = "Camera + GL + H264 running", error = "")
                         RoverRuntimeState.log("CAMERA capture repeating request active id=${config.cameraId}")
                     } catch (t: Throwable) {
                         RoverRuntimeState.setCameraPipelineState(running = false, state = "Capture start failed", error = t.message ?: t.javaClass.simpleName)
@@ -207,14 +256,88 @@ class Camera2H264Streamer(
         )
     }
 
-    private fun chooseFpsRange(chars: CameraCharacteristics, target: Int): Range<Int>? {
+    private fun buildCaptureRequest(camera: CameraDevice, chars: CameraCharacteristics, surface: Surface): CaptureRequest {
+        val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+        builder.addTarget(surface)
+        builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+
+        val aeModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES).orEmpty()
+        if (CaptureRequest.CONTROL_AE_MODE_ON in aeModes) {
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+        }
+        if (chars.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE) == true) {
+            builder.set(CaptureRequest.CONTROL_AE_LOCK, false)
+        }
+        val compRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+        if (compRange != null) {
+            builder.set(
+                CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
+                config.cameraExposureCompensation.coerceIn(compRange.lower, compRange.upper),
+            )
+        }
+        selectedFpsRange?.let { builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, it) }
+
+        val awbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES).orEmpty()
+        if (CaptureRequest.CONTROL_AWB_MODE_AUTO in awbModes) {
+            builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+        }
+        if (chars.get(CameraCharacteristics.CONTROL_AWB_LOCK_AVAILABLE) == true) {
+            builder.set(CaptureRequest.CONTROL_AWB_LOCK, false)
+        }
+
+        val afModes = chars.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES).orEmpty()
+        when {
+            CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO in afModes ->
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            CaptureRequest.CONTROL_AF_MODE_AUTO in afModes ->
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+        }
+
+        val effects = chars.get(CameraCharacteristics.CONTROL_AVAILABLE_EFFECTS).orEmpty()
+        if (CaptureRequest.CONTROL_EFFECT_MODE_OFF in effects) {
+            builder.set(CaptureRequest.CONTROL_EFFECT_MODE, CaptureRequest.CONTROL_EFFECT_MODE_OFF)
+        }
+
+        RoverRuntimeState.log(
+            "CAMERA request AE=ON AWB=AUTO AF=${when {
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO in afModes -> "CONTINUOUS_VIDEO"
+                CaptureRequest.CONTROL_AF_MODE_AUTO in afModes -> "AUTO"
+                else -> "device default"
+            }} effect=OFF fps=${selectedFpsRange ?: "device default"} exposureComp=${config.cameraExposureCompensation}",
+        )
+        return builder.build()
+    }
+
+    private fun chooseFpsRange(chars: CameraCharacteristics): Range<Int>? {
         val ranges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)?.toList().orEmpty()
         if (ranges.isEmpty()) return null
-        return ranges.minByOrNull { range ->
-            val containsPenalty = if (target in range.lower..range.upper) 0 else 1_000_000
-            val fixedPenalty = if (range.lower == target && range.upper == target) 0 else abs(range.upper - range.lower) * 100
-            containsPenalty + fixedPenalty + abs(range.upper - target)
+
+        if (config.cameraFpsMin >= 0) {
+            ranges.firstOrNull { it.lower == config.cameraFpsMin && it.upper == config.cameraFpsMax }?.let { return it }
         }
+
+        val targetMax = config.cameraFpsMax.coerceAtLeast(1)
+        return ranges.minByOrNull { range ->
+            val maxPenalty = abs(range.upper - targetMax) * 10_000
+            val tooHighPenalty = if (range.upper > targetMax) 1_000 else 0
+            val lowMinBonus = range.lower
+            maxPenalty + tooHighPenalty + lowMinBonus
+        }
+    }
+
+    private fun logCaptureState(result: TotalCaptureResult) {
+        val now = System.currentTimeMillis()
+        if (now - lastCaptureLogMs < 2000) return
+        lastCaptureLogMs = now
+        val ae = result.get(CaptureResult.CONTROL_AE_STATE)
+        val awb = result.get(CaptureResult.CONTROL_AWB_STATE)
+        val af = result.get(CaptureResult.CONTROL_AF_STATE)
+        val exposureNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+        val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)
+        val frameDuration = result.get(CaptureResult.SENSOR_FRAME_DURATION)
+        RoverRuntimeState.log(
+            "CAMERA capture AE=$ae AWB=$awb AF=$af exposureNs=$exposureNs ISO=$iso frameDurationNs=$frameDuration",
+        )
     }
 
     private fun startDrainThread(codec: MediaCodec) {
@@ -306,6 +429,8 @@ class Camera2H264Streamer(
         captureSession = null
         runCatching { cameraDevice?.close() }
         cameraDevice = null
+        glBridge?.close()
+        glBridge = null
         publisher?.close()
         publisher = null
         drainThread?.interrupt()
