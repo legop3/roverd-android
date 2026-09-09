@@ -25,6 +25,7 @@ class RoverService : Service() {
 
     private var roomba: UsbRoomba? = null
     private var server: RoverServerClient? = null
+    private var autoCharge: AutoChargeController? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
@@ -47,12 +48,33 @@ class RoverService : Service() {
                 "brcWidthMs=${config.brcPulseWidthMs}",
         )
 
+        autoCharge = AutoChargeController(
+            seekDock = {
+                val activeRoomba = roomba
+                if (activeRoomba == null || !activeRoomba.isConnected()) {
+                    throw IllegalStateException("USB serial not connected")
+                }
+                activeRoomba.seekDock()
+            },
+            emitEvent = { event, data ->
+                val activeServer = server
+                if (activeServer != null) {
+                    activeServer.sendEvent(event, data)
+                } else {
+                    RoverRuntimeState.log("EVENT event=$event data=$data (server unavailable)")
+                }
+            },
+        )
+
         startServer(config)
 
         roomba = UsbRoomba(
             context = this,
             config = config,
-            onSensorFrame = { frame -> server?.sendSensorFrame(frame) },
+            onSensorFrame = { frame ->
+                autoCharge?.onSensorFrame(frame)
+                server?.sendSensorFrame(frame)
+            },
             onStatus = ::status,
             onConnectionChanged = { connected ->
                 RoverRuntimeState.log("USB optional subsystem connected=$connected")
@@ -141,6 +163,7 @@ class RoverService : Service() {
         stopServer()
         roomba?.close()
         roomba = null
+        autoCharge = null
     }
 
     private fun status(message: String) {
