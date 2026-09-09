@@ -37,6 +37,8 @@ object RoverSettings {
     fun load(context: Context): RoverConfig {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val legacyFps = p.getInt("cameraFps", 30)
+        val fpsMin = if (p.contains("cameraFpsMin")) p.getInt("cameraFpsMin", legacyFps) else -1
+        val fpsMax = if (p.contains("cameraFpsMax")) p.getInt("cameraFpsMax", legacyFps) else legacyFps
         return RoverConfig(
             name = p.getString("name", "android-rover") ?: "android-rover",
             serverUrl = p.getString("serverUrl", "wss://rover.otter.land/rover") ?: "wss://rover.otter.land/rover",
@@ -52,8 +54,8 @@ object RoverSettings {
             cameraEnabled = p.getBoolean("cameraEnabled", false),
             cameraWidth = p.getInt("cameraWidth", 640),
             cameraHeight = p.getInt("cameraHeight", 480),
-            cameraFpsMin = p.getInt("cameraFpsMin", legacyFps),
-            cameraFpsMax = p.getInt("cameraFpsMax", legacyFps),
+            cameraFpsMin = fpsMin,
+            cameraFpsMax = fpsMax,
             cameraBitrate = p.getInt("cameraBitrate", 2_000_000),
             cameraRotation = p.getInt("cameraRotation", -1),
             cameraExposureCompensation = p.getInt("cameraExposureCompensation", 0),
