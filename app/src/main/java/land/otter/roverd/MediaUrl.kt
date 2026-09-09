@@ -9,6 +9,11 @@ object MediaUrl {
         return deriveRtspUrl(config.serverUrl, config.name, config.cameraRtspPort)
     }
 
+    fun micPublishUrl(config: RoverConfig): String {
+        if (config.micPublishUrl.isNotBlank()) return config.micPublishUrl.trim()
+        return deriveRtspUrl(config.serverUrl, config.name + "-audio", config.micRtspPort)
+    }
+
     fun deriveRtspUrl(serverUrl: String, streamName: String, port: Int = 8554): String {
         val uri = runCatching { URI(serverUrl) }
             .getOrElse { throw IllegalArgumentException("Invalid rover server URL: $serverUrl", it) }
