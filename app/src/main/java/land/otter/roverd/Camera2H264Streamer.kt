@@ -4,7 +4,6 @@ import android.annotation.TargetApi
 import android.content.Context
 import android.hardware.camera2.CaptureRequest
 import android.os.Build
-import android.util.Range
 import com.pedro.common.ConnectChecker
 import com.pedro.encoder.input.video.CameraCallbacks
 import com.pedro.encoder.input.video.CameraHelper
@@ -46,8 +45,8 @@ class Camera2H264Streamer(
         // Select the exact Android camera ID before the background camera is opened.
         rtsp.switchCamera(config.cameraId)
 
-        // Let Camera2 lower the effective frame rate when a variable range was selected.
-        // This is important for auto exposure in dim rooms.
+        // Allow Camera2 to vary frame cadence when the user selected a range such as 15-30.
+        // This gives auto-exposure room to use longer exposures in dim light.
         rtsp.setDynamicFps(config.cameraFpsMin > 0 && config.cameraFpsMin < fps)
 
         rtsp.setCameraCallbacks(object : CameraCallbacks {
@@ -126,8 +125,8 @@ class Camera2H264Streamer(
         val requested = config.cameraRotation
         if (requested >= 0) return normalizeRotation(requested)
 
-        // AUTO is resolved exactly once when streaming starts. Subsequent Activity/UI auto-rotation
-        // cannot change or restart the video orientation.
+        // AUTO is resolved exactly once when streaming starts. Later Activity/UI auto-rotation
+        // cannot change the stream geometry.
         val resolved = CameraHelper.getCameraOrientation(appContext)
         RoverRuntimeState.log("CAMERA AUTO stream rotation resolved once to ${resolved}°")
         return normalizeRotation(resolved)
@@ -138,27 +137,13 @@ class Camera2H264Streamer(
 
     private fun applyCameraControls(rtsp: RtspCamera2) {
         runCatching {
-            rtsp.enableAutoExposure()
-            rtsp.enableAutoWhiteBalance(CaptureRequest.CONTROL_AWB_MODE_AUTO)
-            rtsp.enableAutoFocus()
+            val ae = rtsp.enableAutoExposure()
+            val awb = rtsp.enableAutoWhiteBalance(CaptureRequest.CONTROL_AWB_MODE_AUTO)
+            val af = rtsp.enableAutoFocus()
             rtsp.setExposure(config.cameraExposureCompensation)
-
-            rtsp.setCustomRequest { builder ->
-                builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-                builder.set(CaptureRequest.CONTROL_EFFECT_MODE, CaptureRequest.CONTROL_EFFECT_MODE_OFF)
-                if (config.cameraFpsMin > 0 && config.cameraFpsMax > 0) {
-                    builder.set(
-                        CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                        Range(config.cameraFpsMin, config.cameraFpsMax),
-                    )
-                }
-            }
-
             RoverRuntimeState.log(
-                "CAMERA RootEncoder controls AE=ON AWB=AUTO AF=AUTO effect=OFF " +
-                    "exposureComp=${config.cameraExposureCompensation} fpsRange=${config.cameraFpsMin}-${config.cameraFpsMax}",
+                "CAMERA RootEncoder controls AE=$ae AWB=$awb AF=$af " +
+                    "exposureComp=${config.cameraExposureCompensation} dynamicFps=${config.cameraFpsMin < config.cameraFpsMax}",
             )
         }.onFailure {
             RoverRuntimeState.log("CAMERA RootEncoder control apply failed: ${it.stackTraceToString()}")
