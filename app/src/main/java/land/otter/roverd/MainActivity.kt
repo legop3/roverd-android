@@ -62,7 +62,8 @@ class MainActivity : Activity() {
     private var brcEveryView: EditText? = null
     private var brcWidthView: EditText? = null
 
-    private var cameraIdView: EditText? = null
+    private var cameraIdView: Spinner? = null
+    private var cameraIds: List<String> = emptyList()
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private val refreshRunnable = object : Runnable {
@@ -185,6 +186,7 @@ class MainActivity : Activity() {
         brcEveryView = null
         brcWidthView = null
         cameraIdView = null
+        cameraIds = emptyList()
 
         pageHost.removeAllViews()
         val view = when (page) {
@@ -279,16 +281,43 @@ class MainActivity : Activity() {
     private fun buildCameraPage(): View = scrollPage { root, _ ->
         pageTitle(root, "CAMERA")
 
-        cameraSummaryView = diagnosticText(12f).also { root.addView(it) }
+        cameraSummaryView = diagnosticText(12f).apply {
+            text = cameraSummarySnapshot()
+        }.also { root.addView(it) }
 
         section(root, "CAMERA SETTINGS")
         val cfg = RoverSettings.load(this)
-        cameraIdView = edit(root, "Selected raw Android camera ID").apply { setText(cfg.cameraId) }
+
+        root.addView(TextView(this).apply { text = "Selected raw Android camera ID" })
+        cameraIds = runCatching { CameraDiagnostics.cameraIds(this) }
+            .getOrElse {
+                RoverRuntimeState.log("CAMERA ID enumeration failed: ${it.stackTraceToString()}")
+                emptyList()
+            }
+            .toMutableList()
+            .also { ids ->
+                if (cfg.cameraId !in ids) ids.add(0, cfg.cameraId)
+            }
+            .distinct()
+
+        cameraIdView = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                cameraIds,
+            )
+            setSelection(cameraIds.indexOf(cfg.cameraId).coerceAtLeast(0))
+        }
+        root.addView(cameraIdView)
+
         root.addView(TextView(this).apply {
             text = "Camera IDs are kept raw. No front/back abstraction is used."
             typeface = Typeface.MONOSPACE
             textSize = 11f
         })
+        addButton(root, "REFRESH CAMERA LIST") {
+            refreshCameraList()
+        }
         addButton(root, "SAVE CAMERA SETTINGS") {
             saveCameraSettings()
         }
@@ -341,10 +370,13 @@ class MainActivity : Activity() {
     private fun scrollPage(builder: (LinearLayout, Int) -> Unit): View {
         val density = resources.displayMetrics.density
         val pad = (12 * density).toInt()
-        val scroll = ScrollView(this)
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
+            descendantFocusability = View.FOCUS_BEFORE_DESCENDANTS
         }
         builder(root, pad)
         scroll.addView(root)
@@ -387,12 +419,16 @@ class MainActivity : Activity() {
 
     private fun refreshVisiblePage() {
         when (currentPage) {
-            Page.SYSTEM -> systemDiagnosticsView?.text = systemSnapshot()
-            Page.ROOMBA -> roombaDiagnosticsView?.text = roombaSnapshot()
-            Page.CAMERA -> cameraSummaryView?.text = cameraSummarySnapshot()
+            Page.SYSTEM -> setTextIfChanged(systemDiagnosticsView, systemSnapshot())
+            Page.ROOMBA -> setTextIfChanged(roombaDiagnosticsView, roombaSnapshot())
+            Page.CAMERA -> Unit
             Page.LOG -> refreshLog()
             else -> Unit
         }
+    }
+
+    private fun setTextIfChanged(view: TextView?, value: String) {
+        if (view != null && view.text.toString() != value) view.text = value
     }
 
     private fun systemSnapshot(): String {
@@ -467,11 +503,31 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun refreshCameraList() {
+        if (currentPage != Page.CAMERA) return
+        val spinner = cameraIdView ?: return
+        val saved = RoverSettings.load(this).cameraId
+        val current = cameraIds.getOrNull(spinner.selectedItemPosition) ?: saved
+        val ids = runCatching { CameraDiagnostics.cameraIds(this) }
+            .getOrElse {
+                RoverRuntimeState.log("CAMERA ID enumeration failed: ${it.stackTraceToString()}")
+                emptyList()
+            }
+            .toMutableList()
+        if (current !in ids) ids.add(0, current)
+        cameraIds = ids.distinct()
+        spinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            cameraIds,
+        )
+        spinner.setSelection(cameraIds.indexOf(current).coerceAtLeast(0))
+        RoverRuntimeState.log("CAMERA list refreshed ids=${cameraIds.joinToString(",")}")
+    }
+
     private fun refreshCameraInventory() {
         val output = cameraInventoryView ?: return
-        val selected = cameraIdView?.text?.toString()?.trim().orEmpty().ifEmpty {
-            RoverSettings.load(this).cameraId
-        }
+        val selected = selectedCameraId()
         output.text = "Reading Android camera inventory..."
         Thread {
             val text = runCatching { CameraDiagnostics.snapshot(this, selected) }
@@ -480,6 +536,19 @@ class MainActivity : Activity() {
                 if (currentPage == Page.CAMERA) cameraInventoryView?.text = text
             }
         }.start()
+    }
+
+    private fun selectedCameraId(): String {
+        val spinner = cameraIdView
+        if (spinner != null) {
+            val id = cameraIds.getOrNull(spinner.selectedItemPosition)
+            if (!id.isNullOrBlank()) return id
+        }
+        return RoverSettings.load(this).cameraId
+    }
+
+    private fun refreshCameraSummary() {
+        setTextIfChanged(cameraSummaryView, cameraSummarySnapshot())
     }
 
     private fun refreshLog() {
@@ -518,11 +587,11 @@ class MainActivity : Activity() {
     private fun saveCameraSettings() {
         val old = RoverSettings.load(this)
         val cfg = old.copy(
-            cameraId = cameraIdView?.text?.toString()?.trim().orEmpty().ifEmpty { old.cameraId },
+            cameraId = selectedCameraId().ifBlank { old.cameraId },
         )
         RoverSettings.save(this, cfg)
         RoverRuntimeState.log("UI saved CAMERA settings cameraId=${cfg.cameraId}")
-        refreshVisiblePage()
+        refreshCameraSummary()
     }
 
     private fun copyAllDiagnostics() {
@@ -568,12 +637,14 @@ class MainActivity : Activity() {
     private fun requestCameraPermission() {
         if (Build.VERSION.SDK_INT < 23) {
             RoverRuntimeState.log("CAMERA permission is install-time on API ${Build.VERSION.SDK_INT}")
-            refreshVisiblePage()
+            refreshCameraSummary()
+            refreshCameraList()
             return
         }
         if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             RoverRuntimeState.log("CAMERA permission already granted")
-            refreshVisiblePage()
+            refreshCameraSummary()
+            refreshCameraList()
             return
         }
         requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST)
@@ -585,7 +656,8 @@ class MainActivity : Activity() {
             RoverRuntimeState.log(
                 "CAMERA permission result=${grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED}",
             )
-            refreshVisiblePage()
+            refreshCameraSummary()
+            refreshCameraList()
         }
     }
 
