@@ -30,6 +30,7 @@ data class RoverConfig(
     val micSampleRate: Int,
     val micChannels: Int,
     val micBitrate: Int,
+    val micGainDb: Int,
     val micEchoCanceler: Boolean,
     val micNoiseSuppressor: Boolean,
     val micRtspPort: Int,
@@ -76,6 +77,7 @@ object RoverSettings {
             micSampleRate = p.getInt("micSampleRate", 48_000),
             micChannels = p.getInt("micChannels", 1).coerceIn(1, 2),
             micBitrate = p.getInt("micBitrate", 128_000),
+            micGainDb = p.getInt("micGainDb", 12).coerceIn(-20, 30),
             micEchoCanceler = p.getBoolean("micEchoCanceler", false),
             micNoiseSuppressor = p.getBoolean("micNoiseSuppressor", false),
             micRtspPort = p.getInt("micRtspPort", 8554),
@@ -113,6 +115,7 @@ object RoverSettings {
             .putInt("micSampleRate", config.micSampleRate)
             .putInt("micChannels", config.micChannels)
             .putInt("micBitrate", config.micBitrate)
+            .putInt("micGainDb", config.micGainDb)
             .putBoolean("micEchoCanceler", config.micEchoCanceler)
             .putBoolean("micNoiseSuppressor", config.micNoiseSuppressor)
             .putInt("micRtspPort", config.micRtspPort)
