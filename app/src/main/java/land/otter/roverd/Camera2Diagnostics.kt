@@ -25,10 +25,11 @@ object Camera2Diagnostics {
                 val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
                     ?.joinToString("/") { "${it}mm" }
                     .orEmpty()
-                val extras = listOf(facing, "sensor ${orientation}°", focal)
-                    .filter { it.isNotBlank() }
-                    .joinToString(" — ")
-                CameraChoice(id, "$id — $extras")
+                val lens = if (focal.isBlank()) "focal length unknown" else "lens $focal"
+                CameraChoice(
+                    id,
+                    "Camera ID $id — $facing — $lens — sensor mounted ${orientation}° from phone natural orientation",
+                )
             }
         }.getOrElse { emptyList() }
     }
@@ -93,6 +94,8 @@ object Camera2Diagnostics {
         return buildString {
             appendLine("openable IDs   : ${if (ids.isEmpty()) "(none)" else ids.joinToString(", ")}")
             appendLine("camera count   : ${ids.size}")
+            appendLine("NOTE           : Camera IDs are opaque Android identifiers, not lens numbers or zoom factors.")
+            appendLine("NOTE           : SENSOR_ORIENTATION is how the sensor is mounted inside the phone; it is not the stream rotation setting.")
 
             for (id in ids) {
                 appendLine()
@@ -116,7 +119,7 @@ object Camera2Diagnostics {
                 val exposureStep = c.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
 
                 appendLine("LENS_FACING raw=$facing (${facingName(facing)})")
-                appendLine("SENSOR_ORIENTATION=$orientation")
+                appendLine("SENSOR_MOUNT_ROTATION=$orientation degrees from phone natural orientation")
                 appendLine("HARDWARE_LEVEL raw=$level (${hardwareLevelName(level)})")
                 appendLine("FOCAL_LENGTHS=${formatValue(focalLengths)}")
                 appendLine("SENSOR_PHYSICAL_SIZE=${formatValue(sensorSize)}")
