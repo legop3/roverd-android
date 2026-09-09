@@ -45,10 +45,6 @@ class Camera2H264Streamer(
         // Select the exact Android camera ID before the background camera is opened.
         rtsp.switchCamera(config.cameraId)
 
-        // Allow Camera2 to vary frame cadence when the user selected a range such as 15-30.
-        // This gives auto-exposure room to use longer exposures in dim light.
-        rtsp.setDynamicFps(config.cameraFpsMin > 0 && config.cameraFpsMin < fps)
-
         rtsp.setCameraCallbacks(object : CameraCallbacks {
             override fun onCameraOpened() {
                 RoverRuntimeState.log("CAMERA RootEncoder camera opened id=${config.cameraId}")
@@ -89,7 +85,7 @@ class Camera2H264Streamer(
 
         RoverRuntimeState.log(
             "CAMERA RootEncoder prepare id=${config.cameraId} source=${config.cameraWidth}x${config.cameraHeight} " +
-                "fps=${config.cameraFpsMin}-${config.cameraFpsMax} bitrate=${config.cameraBitrate} " +
+                "fpsCeiling=$fps selectedRange=${config.cameraFpsMin}-${config.cameraFpsMax} bitrate=${config.cameraBitrate} " +
                 "rotation=$rotation url=$publishUrl",
         )
         if (!config.cameraEncoderName.equals("AUTO", ignoreCase = true)) {
@@ -142,8 +138,7 @@ class Camera2H264Streamer(
             val af = rtsp.enableAutoFocus()
             rtsp.setExposure(config.cameraExposureCompensation)
             RoverRuntimeState.log(
-                "CAMERA RootEncoder controls AE=$ae AWB=$awb AF=$af " +
-                    "exposureComp=${config.cameraExposureCompensation} dynamicFps=${config.cameraFpsMin < config.cameraFpsMax}",
+                "CAMERA RootEncoder controls AE=$ae AWB=$awb AF=$af exposureComp=${config.cameraExposureCompensation}",
             )
         }.onFailure {
             RoverRuntimeState.log("CAMERA RootEncoder control apply failed: ${it.stackTraceToString()}")
