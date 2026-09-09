@@ -8,11 +8,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -57,6 +59,7 @@ class MainActivity : Activity() {
         loadSettings()
         requestNotificationPermission()
         startRoverService()
+        requestBatteryOptimizationExemption(userInitiated = false)
     }
 
     override fun onStart() {
@@ -109,6 +112,9 @@ class MainActivity : Activity() {
 
         addButton(root, "RESTART FULL ROVER RUNTIME") {
             sendServiceAction(RoverService.ACTION_RESTART)
+        }
+        addButton(root, "REQUEST BATTERY / DOZE EXEMPTION") {
+            requestBatteryOptimizationExemption(userInitiated = true)
         }
         addButton(root, "RECONNECT USB SERIAL") {
             sendServiceAction(RoverService.ACTION_RECONNECT_USB)
@@ -206,12 +212,14 @@ class MainActivity : Activity() {
         } else {
             "${now - RoverRuntimeState.lastCommandAtMs} ms ago"
         }
+        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
         val batteryOptimization = if (Build.VERSION.SDK_INT >= 23) {
-            val power = getSystemService(Context.POWER_SERVICE) as PowerManager
             if (power.isIgnoringBatteryOptimizations(packageName)) "EXEMPT" else "ACTIVE"
         } else {
             "n/a (< API 23)"
         }
+        val powerSaver = if (Build.VERSION.SDK_INT >= 21) power.isPowerSaveMode.toString() else "n/a"
+        val deviceIdle = if (Build.VERSION.SDK_INT >= 23) power.isDeviceIdleMode.toString() else "n/a"
         val cfg = RoverSettings.load(this)
 
         diagnosticsView.text = buildString {
@@ -225,6 +233,8 @@ class MainActivity : Activity() {
             appendLine("CPU wake lock : ${RoverRuntimeState.wakeLockHeld}")
             appendLine("Wi-Fi lock    : ${RoverRuntimeState.wifiLockHeld}")
             appendLine("battery opt   : $batteryOptimization")
+            appendLine("power saver   : $powerSaver")
+            appendLine("device idle   : $deviceIdle")
             appendLine("serial        : ${cfg.baud} 8N1")
             appendLine("BRC           : ${cfg.brcLine} activeLow=${cfg.brcActiveLow} every=${cfg.brcPulseEveryMs}ms width=${cfg.brcPulseWidthMs}ms")
             appendLine("sensor frames : ${RoverRuntimeState.sensorFrames}")
@@ -281,6 +291,34 @@ class MainActivity : Activity() {
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+    }
+
+    private fun requestBatteryOptimizationExemption(userInitiated: Boolean) {
+        if (Build.VERSION.SDK_INT < 23) {
+            if (userInitiated) RoverRuntimeState.log("POWER Doze exemption not applicable on API ${Build.VERSION.SDK_INT}")
+            return
+        }
+
+        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (power.isIgnoringBatteryOptimizations(packageName)) {
+            if (userInitiated) RoverRuntimeState.log("POWER battery optimization exemption already granted")
+            return
+        }
+
+        RoverRuntimeState.log("POWER requesting battery optimization / Doze exemption")
+        val direct = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+            data = Uri.parse("package:$packageName")
+        }
+        runCatching {
+            startActivity(direct)
+        }.onFailure { directFailure ->
+            RoverRuntimeState.log("POWER direct exemption request failed: ${directFailure.message}; opening battery optimization settings")
+            runCatching {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            }.onFailure { settingsFailure ->
+                RoverRuntimeState.log("POWER battery optimization settings failed: ${settingsFailure.stackTraceToString()}")
+            }
         }
     }
 }
