@@ -14,6 +14,7 @@
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
     <application
+        android:name=".RoverApplication"
         android:allowBackup="false"
         android:label="Roverd Android"
         android:theme="@android:style/Theme.Holo.Light.NoActionBar"
