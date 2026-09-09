@@ -119,6 +119,20 @@ class RoverServerClient(
             }
         }
 
+        val audioPlayback = JSONObject().put("enabled", config.audioPlaybackEnabled)
+        if (config.audioPlaybackEnabled) {
+            runCatching {
+                audioPlayback
+                    .put("service", "android-libvlc")
+                    .put("forwardUrl", MediaUrl.audioPlaybackUrl(config))
+                    .put("device", "android-system-media")
+                    .put("normalize", false)
+            }.onFailure {
+                RoverRuntimeState.log("AUDIO playback hello URL failure: ${it.stackTraceToString()}")
+                audioPlayback.put("enabled", false)
+            }
+        }
+
         val hello = JSONObject()
             .put("type", "hello")
             .put("name", config.name)
@@ -133,10 +147,18 @@ class RoverServerClient(
                 .put("manage", false)
                 .put("video", video)
                 .put("audioCapture", audioCapture)
-                .put("audioPlayback", JSONObject().put("enabled", false)))
+                .put("audioPlayback", audioPlayback))
             .put("cameraServo", JSONObject().put("enabled", false))
-            .put("audio", JSONObject().put("ttsEnabled", false))
-            .put("horn", JSONObject().put("enabled", false))
+            .put("audio", JSONObject()
+                .put("ttsEnabled", config.ttsEnabled)
+                .put("defaultEngine", "android")
+                .put("defaultVoice", config.ttsVoice)
+                .put("defaultPitch", (config.ttsPitch * 50f).toInt().coerceIn(1, 99)))
+            .put("horn", JSONObject()
+                .put("enabled", config.hornEnabled)
+                .put("volume", config.hornVolume)
+                .put("sampleRate", 48_000)
+                .put("channels", 1))
             .put("headlight", disabledToggle)
             .put("laser", JSONObject(disabledToggle.toString()))
             .put("private", JSONObject().put("enabled", false))
@@ -226,6 +248,15 @@ class RoverServerClient(
                 }
                 RoverRuntimeState.log("CMD song slot=$slot notes=${notes.size} loop=${p.optBoolean("loop", false)}")
                 connectedRoomba().playSong(slot, notes)
+            }
+            msg.has("tts") -> {
+                RoverAudioController.handleTts(msg.getJSONObject("tts"))
+            }
+            msg.has("horn") -> {
+                RoverAudioController.handleHorn(msg.getJSONObject("horn"))
+            }
+            msg.has("audioLevels") -> {
+                RoverAudioController.handleAudioLevels(msg.getJSONObject("audioLevels"))
             }
             else -> throw UnsupportedOperationException("Unsupported command type: ${msg.optString("type", "unknown")}")
         }
