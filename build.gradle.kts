@@ -5,17 +5,17 @@ plugins {
 allprojects {
     configurations.configureEach {
         resolutionStrategy {
-            // RootEncoder 2.8.x requires compileSdk 37. Keep the camera library on the
-            // newest release built for Android 36 so the rover can retain compileSdk 36.
+            // Keep every RootEncoder module on the same release. The camera subsystem uses the
+            // current GenericStream API instead of the older RtspCamera2 compatibility wrapper.
             force(
-                "com.github.pedroSG94.RootEncoder:library:2.7.2",
-                "com.github.pedroSG94.RootEncoder:common:2.7.2",
-                "com.github.pedroSG94.RootEncoder:encoder:2.7.2",
-                "com.github.pedroSG94.RootEncoder:rtmp:2.7.2",
-                "com.github.pedroSG94.RootEncoder:rtsp:2.7.2",
-                "com.github.pedroSG94.RootEncoder:srt:2.7.2",
-                "com.github.pedroSG94.RootEncoder:udp:2.7.2",
-                "com.github.pedroSG94.RootEncoder:whip:2.7.2",
+                "com.github.pedroSG94.RootEncoder:library:2.8.1",
+                "com.github.pedroSG94.RootEncoder:common:2.8.1",
+                "com.github.pedroSG94.RootEncoder:encoder:2.8.1",
+                "com.github.pedroSG94.RootEncoder:rtmp:2.8.1",
+                "com.github.pedroSG94.RootEncoder:rtsp:2.8.1",
+                "com.github.pedroSG94.RootEncoder:srt:2.8.1",
+                "com.github.pedroSG94.RootEncoder:udp:2.8.1",
+                "com.github.pedroSG94.RootEncoder:whip:2.8.1",
             )
         }
     }
