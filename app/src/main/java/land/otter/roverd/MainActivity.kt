@@ -376,7 +376,6 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
-            descendantFocusability = View.FOCUS_BEFORE_DESCENDANTS
         }
         builder(root, pad)
         scroll.addView(root)
