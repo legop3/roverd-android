@@ -5,14 +5,10 @@ import android.content.Context
 import android.os.Build
 import android.view.Surface
 import android.view.WindowManager
-import com.pedro.common.ConnectChecker
-import com.pedro.encoder.input.sources.audio.NoAudioSource
 import com.pedro.encoder.input.video.CameraCallbacks
 import com.pedro.encoder.input.video.CameraHelper
 import com.pedro.encoder.utils.CodecUtil
-import com.pedro.library.generic.GenericStream
 import com.pedro.library.view.GlStreamInterface
-import com.pedro.rtsp.rtsp.Protocol
 import java.io.Closeable
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
@@ -29,19 +25,19 @@ class Camera2H264Streamer(
     private val closed = AtomicBoolean(false)
     private val restartRequested = AtomicBoolean(false)
 
-    @Volatile private var stream: GenericStream? = null
+    @Volatile private var stream: RoverH264Stream? = null
     private var statsThread: Thread? = null
 
     private val publishUrl: String by lazy { MediaUrl.videoPublishUrl(config) }
 
-    // A rover camera is always published in a landscape H.264 canvas. Camera sensor orientation is
-    // allowed to rotate pixels inside that canvas, but it is never allowed to swap codec dimensions.
-    private val outputWidth: Int = max(config.cameraWidth, config.cameraHeight)
-    private val outputHeight: Int = min(config.cameraWidth, config.cameraHeight)
+    // Rover video is always a landscape H.264 canvas. Camera orientation may rotate pixels inside
+    // the canvas, but it is never allowed to swap encoded width/height.
+    private val outputWidth = max(config.cameraWidth, config.cameraHeight)
+    private val outputHeight = min(config.cameraWidth, config.cameraHeight)
 
     private data class OrientationPlan(
         val sensorMount: Int,
-        val phoneRotation: Int,
+        val displayRotation: Int,
         val pixelRotation: Int,
         val facing: String,
         val automatic: Boolean,
@@ -54,17 +50,8 @@ class Camera2H264Streamer(
         val orientation = resolveOrientationPlan()
         val fps = config.cameraFpsMax.coerceIn(1, 120)
         val source = RoverCamera2Source(appContext, config.cameraId)
-        val generic = GenericStream(appContext, connectChecker(), source, NoAudioSource())
-        stream = generic
-
-        generic.getStreamClient().apply {
-            setProtocol(Protocol.TCP)
-            setOnlyVideo(true)
-            setReTries(100)
-            setCheckServerAlive(false)
-            setSocketTimeout(10_000)
-            setLogs(true)
-        }
+        val roverStream = RoverH264Stream(appContext, source)
+        stream = roverStream
 
         val codecPreference = when (config.cameraEncoderName.uppercase(Locale.US)) {
             "HARDWARE" -> CodecUtil.CodecType.HARDWARE
@@ -72,42 +59,42 @@ class Camera2H264Streamer(
             "CBR_PRIORITY" -> CodecUtil.CodecType.CBR_PRIORITY
             else -> CodecUtil.CodecType.FIRST_COMPATIBLE_FOUND
         }
-        generic.forceCodecType(codecPreference, CodecUtil.CodecType.FIRST_COMPATIBLE_FOUND)
+        roverStream.forceCodecType(codecPreference, CodecUtil.CodecType.FIRST_COMPATIBLE_FOUND)
 
         source.setCallbacks(object : CameraCallbacks {
             override fun onCameraOpened() {
-                RoverRuntimeState.log("CAMERA GenericStream camera opened id=${config.cameraId}")
+                RoverRuntimeState.log("CAMERA Camera2 source opened id=${config.cameraId}")
                 runCatching { source.applyAutomaticControls(config.cameraExposureCompensation) }
                     .onFailure { RoverRuntimeState.log("CAMERA controls failed: ${it.stackTraceToString()}") }
-                applyFixedLandscapeGeometry(generic, orientation)
+                applyFixedLandscapeGeometry(roverStream, orientation)
             }
 
             override fun onCameraChanged(facing: CameraHelper.Facing) {
-                RoverRuntimeState.log("CAMERA GenericStream camera changed id=${source.currentCameraId()} facing=$facing")
+                RoverRuntimeState.log("CAMERA source changed id=${source.currentCameraId()} facing=$facing")
             }
 
             override fun onCameraError(error: String) {
                 RoverRuntimeState.setCameraPipelineState(running = false, state = "Camera error", error = error)
-                RoverRuntimeState.log("CAMERA GenericStream camera error: $error")
+                RoverRuntimeState.log("CAMERA source error: $error")
                 requestFullRestart("camera error: $error")
             }
 
             override fun onCameraDisconnected() {
                 RoverRuntimeState.setCameraPipelineState(running = false, state = "Camera disconnected")
-                RoverRuntimeState.log("CAMERA GenericStream camera disconnected")
+                RoverRuntimeState.log("CAMERA source disconnected")
                 requestFullRestart("camera disconnected")
             }
         })
 
-        generic.setFpsListener { actualFps ->
+        roverStream.setFpsListener { actualFps ->
             RoverRuntimeState.setCameraPipelineState(fps = actualFps)
         }
 
         RoverRuntimeState.setCameraPipelineState(
             running = false,
-            state = "Preparing GenericStream",
+            state = "Preparing Camera2 + RootEncoder",
             cameraId = config.cameraId,
-            encoderName = "RootEncoder 2.8.1 GenericStream / ${codecPreference.name}",
+            encoderName = "RootEncoder 2.8.1 encoder / ${codecPreference.name} + roverd RTSP",
             width = outputWidth,
             height = outputHeight,
             fps = fps,
@@ -117,15 +104,15 @@ class Camera2H264Streamer(
         )
 
         RoverRuntimeState.log(
-            "CAMERA GenericStream prepare id=${config.cameraId} selected=${config.cameraWidth}x${config.cameraHeight} " +
+            "CAMERA prepare id=${config.cameraId} selected=${config.cameraWidth}x${config.cameraHeight} " +
                 "encodedCanvas=${outputWidth}x${outputHeight} fps=$fps bitrate=${config.cameraBitrate} " +
-                "sensor=${orientation.sensorMount} display=${orientation.phoneRotation} pixels=${orientation.pixelRotation} " +
+                "sensor=${orientation.sensorMount} display=${orientation.displayRotation} pixels=${orientation.pixelRotation} " +
                 "automatic=${orientation.automatic} facing=${orientation.facing} codec=${codecPreference.name}",
         )
 
-        // Always use rotation=0 here. RootEncoder intentionally swaps encoder width/height when
-        // prepareVideo receives 90/270. Pixel rotation is applied afterwards in GLES instead.
-        val prepared = generic.prepareVideo(
+        // RootEncoder swaps codec width/height when prepareVideo rotation is 90/270. Never allow
+        // that here. All orientation correction is done in GLES inside this fixed landscape canvas.
+        val prepared = roverStream.prepareVideo(
             width = outputWidth,
             height = outputHeight,
             bitrate = config.cameraBitrate.coerceAtLeast(64_000),
@@ -137,17 +124,16 @@ class Camera2H264Streamer(
             throw IllegalStateException("Could not prepare H.264 ${outputWidth}x${outputHeight}@$fps")
         }
 
-        applyFixedLandscapeGeometry(generic, orientation)
-        generic.startStream(publishUrl)
-        // Source start is asynchronous; apply once more after start and from onCameraOpened.
-        applyFixedLandscapeGeometry(generic, orientation)
+        applyFixedLandscapeGeometry(roverStream, orientation)
+        roverStream.startStream(publishUrl)
+        applyFixedLandscapeGeometry(roverStream, orientation)
 
         RoverRuntimeState.setCameraPipelineState(
             running = true,
-            state = "GenericStream camera + H264 running",
+            state = "Camera2 + RootEncoder H264 running",
             error = "",
         )
-        startStatsThread(generic)
+        startStatsThread()
     }
 
     private fun resolveOrientationPlan(): OrientationPlan {
@@ -158,7 +144,7 @@ class Camera2H264Streamer(
         val automatic = config.cameraRotation < 0
 
         val pixels = if (!automatic) {
-            // Manual setting is deliberately literal and independent of camera metadata.
+            // Manual 0/90/180/270 is literal final-pixel rotation, not metadata interpretation.
             normalizeRotation(config.cameraRotation)
         } else if (facing.equals("FRONT", true)) {
             normalizeRotation(sensor + display)
@@ -181,14 +167,14 @@ class Camera2H264Streamer(
 
     private fun normalizeRotation(value: Int): Int = (((value % 360) + 360) % 360 / 90) * 90
 
-    private fun applyFixedLandscapeGeometry(generic: GenericStream, orientation: OrientationPlan) {
-        val gl = generic.getGlInterface() as? GlStreamInterface ?: return
+    private fun applyFixedLandscapeGeometry(roverStream: RoverH264Stream, orientation: OrientationPlan) {
+        val gl = roverStream.getGlInterface() as? GlStreamInterface ?: return
         gl.autoHandleOrientation = false
-        // RoverCamera2Source already neutralizes source orientation. Only rotate the final pixels.
+        // RoverCamera2Source neutralizes the Camera2 source orientation. Rotate only the final image.
         gl.setRotation(0)
         gl.setEncoderSize(outputWidth, outputHeight)
         gl.setStreamRotation(orientation.pixelRotation)
-        // Quarter-turns are pillarboxed/letterboxed inside the LANDSCAPE canvas rather than stretched.
+        // This tells RootEncoder's viewport calculator to preserve aspect ratio on quarter-turns.
         gl.setStreamIsPortrait(orientation.pixelRotation == 90 || orientation.pixelRotation == 270)
         RoverRuntimeState.log(
             "CAMERA geometry canvas=${outputWidth}x${outputHeight} pixelRotation=${orientation.pixelRotation} " +
@@ -196,76 +182,37 @@ class Camera2H264Streamer(
         )
     }
 
-    private fun connectChecker(): ConnectChecker = object : ConnectChecker {
-        override fun onConnectionStarted(url: String) {
-            RoverRuntimeState.setCameraPublisherState(false, "Connecting RTSP", "")
-            RoverRuntimeState.log("CAMERA RTSP connecting $url")
-        }
-
-        override fun onConnectionSuccess() {
-            RoverRuntimeState.setCameraPublisherState(true, "Publishing RTSP/TCP", "")
-            RoverRuntimeState.log("CAMERA RTSP connected")
-        }
-
-        override fun onConnectionFailed(reason: String) {
-            if (closed.get()) return
-            RoverRuntimeState.setCameraPublisherState(false, "RTSP failed", reason)
-            RoverRuntimeState.log("CAMERA RTSP failed: $reason")
-            val client = stream?.getStreamClient()
-            if (client != null && client.reTry(2_000, reason, null)) {
-                RoverRuntimeState.recordCameraReconnect()
-                RoverRuntimeState.log("CAMERA RTSP retry scheduled")
-            } else {
-                requestFullRestart("RTSP retry unavailable: $reason")
-            }
-        }
-
-        override fun onDisconnect() {
-            RoverRuntimeState.setCameraPublisherState(false, "RTSP disconnected", "")
-            RoverRuntimeState.log("CAMERA RTSP disconnected")
-            if (!closed.get()) requestFullRestart("RTSP disconnected")
-        }
-
-        override fun onAuthError() {
-            RoverRuntimeState.setCameraPublisherState(false, "RTSP auth error", "RTSP authentication error")
-            requestFullRestart("RTSP authentication error")
-        }
-
-        override fun onAuthSuccess() {
-            RoverRuntimeState.log("CAMERA RTSP authentication success")
-        }
-
-        override fun onNewBitrate(bitrate: Long) {
-            RoverRuntimeState.setCameraPipelineState(bitrate = bitrate.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
-        }
-    }
-
-    private fun startStatsThread(generic: GenericStream) {
+    private fun startStatsThread() {
         statsThread = Thread({
-            val client = generic.getStreamClient()
             val startedAt = System.currentTimeMillis()
-            var lastSentFrames = -1L
-            var lastProgressAt = startedAt
+            var lastEncoded = -1L
+            var lastPublished = -1L
+            var lastEncodeProgressAt = startedAt
+            var lastPublishProgressAt = startedAt
 
             while (!closed.get()) {
-                runCatching {
-                    val sentFrames = client.getSentVideoFrames()
-                    val sentBytes = client.getBytesSend()
-                    val dropped = client.getDroppedVideoFrames()
-                    val now = System.currentTimeMillis()
+                val now = System.currentTimeMillis()
+                val encoded = RoverRuntimeState.cameraEncodedFrames
+                val published = RoverRuntimeState.cameraPublishedFrames
 
-                    RoverRuntimeState.setCameraLibraryCounters(sentFrames, sentBytes, dropped)
-                    if (sentFrames > lastSentFrames) {
-                        lastSentFrames = sentFrames
-                        lastProgressAt = now
-                    } else if (now - startedAt >= 12_000L && now - lastProgressAt >= 8_000L) {
+                if (encoded > lastEncoded) {
+                    lastEncoded = encoded
+                    lastEncodeProgressAt = now
+                }
+                if (published > lastPublished) {
+                    lastPublished = published
+                    lastPublishProgressAt = now
+                }
+
+                if (now - startedAt >= 12_000L) {
+                    if (now - lastEncodeProgressAt >= 8_000L) {
+                        requestFullRestart("encoder/camera produced no frames for ${now - lastEncodeProgressAt}ms")
+                    } else if (now - lastPublishProgressAt >= 8_000L) {
                         requestFullRestart(
-                            "no sent-frame progress for ${now - lastProgressAt}ms " +
-                                "sent=$sentFrames connected=${RoverRuntimeState.cameraPublisherConnected}",
+                            "MediaMTX publish made no progress for ${now - lastPublishProgressAt}ms " +
+                                "encoded=$encoded published=$published",
                         )
                     }
-                }.onFailure {
-                    if (!closed.get()) requestFullRestart("stats failure: ${it.message}")
                 }
 
                 try {
@@ -274,7 +221,7 @@ class Camera2H264Streamer(
                     break
                 }
             }
-        }, "roverd-camera-stats").apply {
+        }, "roverd-camera-watchdog").apply {
             isDaemon = true
             start()
         }
@@ -291,13 +238,14 @@ class Camera2H264Streamer(
         if (!closed.compareAndSet(false, true)) return
         statsThread?.interrupt()
         statsThread = null
-        stream?.let { generic ->
-            runCatching { if (generic.isStreaming) generic.stopStream() }
-            runCatching { generic.release() }
+        stream?.let { roverStream ->
+            runCatching { if (roverStream.isStreaming) roverStream.stopStream() }
+            runCatching { roverStream.release() }
+            runCatching { roverStream.closeTransport() }
         }
         stream = null
         RoverRuntimeState.setCameraPipelineState(running = false, state = "Stopped", error = "")
         RoverRuntimeState.setCameraPublisherState(false, "Stopped", "")
-        RoverRuntimeState.log("CAMERA GenericStream pipeline stopped")
+        RoverRuntimeState.log("CAMERA pipeline stopped")
     }
 }
