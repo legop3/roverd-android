@@ -46,6 +46,8 @@ class UsbRoomba(
     @Volatile private var lastSensorFrameNs = 0L
     @Volatile private var lastSensorRecoveryNs = 0L
     @Volatile private var sensorStreamWanted = true
+    @Volatile private var pendingPermissionDeviceId = -1
+    @Volatile private var pendingPermissionPortIndex = 0
     private var brcTask: ScheduledFuture<*>? = null
     private var sensorWatchdogTask: ScheduledFuture<*>? = null
 
@@ -55,10 +57,12 @@ class UsbRoomba(
                 ACTION_USB_PERMISSION -> {
                     val device = intent.usbDevice()
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) && device != null) {
-                        openDevice(device)
+                        val portIndex = if (device.deviceId == pendingPermissionDeviceId) pendingPermissionPortIndex else selectedPortIndex(device)
+                        openDevice(device, portIndex)
                     } else {
                         onStatus("USB permission denied")
                     }
+                    pendingPermissionDeviceId = -1
                 }
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> connect()
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
@@ -91,18 +95,39 @@ class UsbRoomba(
     fun connect() {
         if (port != null) return
         val drivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
-        RoverRuntimeState.log("USB probe found ${drivers.size} supported serial driver(s)")
-        val driver = drivers.firstOrNull()
-        if (driver == null) {
-            onStatus("No supported USB serial adapter found")
+        RoverRuntimeState.log("USB probe found ${drivers.size} supported serial driver(s), preference=${config.usbSerialPreference}")
+
+        val selected = drivers.asSequence().flatMap { driver ->
+            driver.ports.indices.asSequence().map { portIndex -> Triple(driver, driver.device, portIndex) }
+        }.firstOrNull { (_, device, portIndex) ->
+            UsbSerialSelector.matches(config.usbSerialPreference, device, portIndex)
+        }
+
+        if (selected == null) {
+            if (drivers.isEmpty()) {
+                onStatus("No supported USB serial adapter found")
+            } else {
+                onStatus("Selected USB serial adapter not found: ${config.usbSerialPreference}")
+                RoverRuntimeState.log(
+                    "USB selected adapter missing preference=${config.usbSerialPreference} available=" +
+                        drivers.flatMap { d -> d.ports.indices.map { i -> UsbSerialSelector.key(d.device.vendorId, d.device.productId, i) } }.joinToString(),
+                )
+            }
             return
         }
-        val device = driver.device
+
+        val driver = selected.first
+        val device = selected.second
+        val portIndex = selected.third
+        val key = UsbSerialSelector.key(device.vendorId, device.productId, portIndex)
         RoverRuntimeState.log(
-            "USB candidate name=${device.deviceName} vid=0x${device.vendorId.toString(16)} " +
-                "pid=0x${device.productId.toString(16)} driver=${driver.javaClass.simpleName} ports=${driver.ports.size}",
+            "USB candidate key=$key name=${device.deviceName} vid=0x${device.vendorId.toString(16)} " +
+                "pid=0x${device.productId.toString(16)} driver=${driver.javaClass.simpleName} port=$portIndex ports=${driver.ports.size}",
         )
+
         if (!usbManager.hasPermission(device)) {
+            pendingPermissionDeviceId = device.deviceId
+            pendingPermissionPortIndex = portIndex
             val permissionIntent = PendingIntent.getBroadcast(
                 context,
                 0,
@@ -110,17 +135,28 @@ class UsbRoomba(
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             usbManager.requestPermission(device, permissionIntent)
-            onStatus("Waiting for USB permission")
+            onStatus("Waiting for USB permission: $key")
             return
         }
-        openDevice(device)
+        openDevice(device, portIndex)
     }
 
-    private fun openDevice(device: UsbDevice) {
+    private fun selectedPortIndex(device: UsbDevice): Int {
+        val driver = UsbSerialProber.getDefaultProber().probeDevice(device) ?: return 0
+        return driver.ports.indices.firstOrNull { index ->
+            UsbSerialSelector.matches(config.usbSerialPreference, device, index)
+        } ?: 0
+    }
+
+    private fun openDevice(device: UsbDevice, portIndex: Int) {
         if (port != null) return
         val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
-        if (driver == null || driver.ports.isEmpty()) {
-            onStatus("USB device is not a supported serial adapter")
+        if (driver == null || portIndex !in driver.ports.indices) {
+            onStatus("USB device/port is not a supported serial adapter")
+            return
+        }
+        if (!UsbSerialSelector.matches(config.usbSerialPreference, device, portIndex)) {
+            onStatus("USB adapter does not match configured selection")
             return
         }
         val connection = usbManager.openDevice(device)
@@ -129,7 +165,7 @@ class UsbRoomba(
             return
         }
         try {
-            val openedPort = driver.ports[0]
+            val openedPort = driver.ports[portIndex]
             openedPort.open(connection)
             openedPort.setParameters(
                 config.baud,
@@ -146,17 +182,20 @@ class UsbRoomba(
             startBrcPulser()
             startSensorWatchdog()
 
+            val key = UsbSerialSelector.key(device.vendorId, device.productId, portIndex)
             val description = buildString {
                 append(device.deviceName)
+                append(" key=$key")
                 append(" vid=0x${device.vendorId.toString(16)}")
                 append(" pid=0x${device.productId.toString(16)}")
                 append(" driver=${driver.javaClass.simpleName}")
+                append(" port=$portIndex")
                 append(" baud=${config.baud}")
                 append(" BRC=${config.brcLine}/${if (config.brcActiveLow) "active-low" else "active-high"}")
             }
             RoverRuntimeState.setUsbState(true, description)
             onConnectionChanged(true)
-            onStatus("USB serial connected: ${device.deviceName} @ ${config.baud}")
+            onStatus("USB serial connected: $key @ ${config.baud}")
 
             scheduler.schedule(
                 { recoverSensorStream("startup") },
