@@ -11,6 +11,8 @@ data class RoverConfig(
     val brcActiveLow: Boolean,
     val brcPulseEveryMs: Long,
     val brcPulseWidthMs: Long,
+    val autoSideBrushEnabled: Boolean,
+    val autoSideBrushSpeed: Int,
     val cameraId: String,
     val cameraEnabled: Boolean,
     val cameraWidth: Int,
@@ -37,6 +39,8 @@ object RoverSettings {
             brcActiveLow = p.getBoolean("brcActiveLow", true),
             brcPulseEveryMs = p.getLong("brcPulseEveryMs", 60_000L),
             brcPulseWidthMs = p.getLong("brcPulseWidthMs", 1_000L),
+            autoSideBrushEnabled = p.getBoolean("autoSideBrushEnabled", true),
+            autoSideBrushSpeed = p.getInt("autoSideBrushSpeed", 20),
             cameraId = p.getString("cameraId", "0") ?: "0",
             cameraEnabled = p.getBoolean("cameraEnabled", false),
             cameraWidth = p.getInt("cameraWidth", 640),
@@ -58,6 +62,8 @@ object RoverSettings {
             .putBoolean("brcActiveLow", config.brcActiveLow)
             .putLong("brcPulseEveryMs", config.brcPulseEveryMs)
             .putLong("brcPulseWidthMs", config.brcPulseWidthMs)
+            .putBoolean("autoSideBrushEnabled", config.autoSideBrushEnabled)
+            .putInt("autoSideBrushSpeed", config.autoSideBrushSpeed)
             .putString("cameraId", config.cameraId)
             .putBoolean("cameraEnabled", config.cameraEnabled)
             .putInt("cameraWidth", config.cameraWidth)
