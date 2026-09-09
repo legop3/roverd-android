@@ -26,7 +26,6 @@ class AudioSettingsView(context: Context) : ScrollView(context) {
     private val playbackEnabledView = CheckBox(context)
     private val playbackVolumeView = EditText(context)
     private val networkCacheView = EditText(context)
-    private val rtspPortView = EditText(context)
     private val playbackUrlView = EditText(context)
     private val ttsEnabledView = CheckBox(context)
     private val ttsPitchView = EditText(context)
@@ -36,6 +35,8 @@ class AudioSettingsView(context: Context) : ScrollView(context) {
     private val ttsTestView = EditText(context)
     private val hornEnabledView = CheckBox(context)
     private val hornVolumeView = EditText(context)
+    private val hornSineGainView = EditText(context)
+    private val hornSawGainView = EditText(context)
     private val hornMaxDurationView = EditText(context)
 
     private val refreshTask = object : Runnable {
@@ -74,9 +75,9 @@ class AudioSettingsView(context: Context) : ScrollView(context) {
         label(root, "RTSP network cache (ms, 0..2000)")
         networkCacheView.setText(cfg.audioPlaybackNetworkCachingMs.toString())
         root.addView(networkCacheView)
-        label(root, "MediaMTX RTSP port")
-        rtspPortView.setText(cfg.audioPlaybackRtspPort.toString())
-        root.addView(rtspPortView)
+        root.addView(diagnostic(10f).apply {
+            text = "Shared MediaMTX RTSP port: ${cfg.mediaRtspPort} (SYSTEM tab)"
+        })
         label(root, "RTSP read URL override (blank = server host + rover-name-fwd)")
         playbackUrlView.setText(cfg.audioPlaybackUrl)
         root.addView(playbackUrlView)
@@ -134,6 +135,12 @@ class AudioSettingsView(context: Context) : ScrollView(context) {
         label(root, "Horn base volume (0.0..1.0)")
         hornVolumeView.setText(cfg.hornVolume.toString())
         root.addView(hornVolumeView)
+        label(root, "Sine waveform gain (0.0..4.0)")
+        hornSineGainView.setText(cfg.hornSineGain.toString())
+        root.addView(hornSineGainView)
+        label(root, "Saw waveform gain (0.0..4.0)")
+        hornSawGainView.setText(cfg.hornSawGain.toString())
+        root.addView(hornSawGainView)
         label(root, "Horn maximum duration (ms)")
         hornMaxDurationView.setText(cfg.hornMaxDurationMs.toString())
         root.addView(hornMaxDurationView)
@@ -179,7 +186,6 @@ class AudioSettingsView(context: Context) : ScrollView(context) {
             audioPlaybackEnabled = playbackEnabledView.isChecked,
             audioPlaybackVolume = (playbackVolumeView.text.toString().toIntOrNull() ?: old.audioPlaybackVolume).coerceIn(0, 200),
             audioPlaybackNetworkCachingMs = (networkCacheView.text.toString().toIntOrNull() ?: old.audioPlaybackNetworkCachingMs).coerceIn(0, 2_000),
-            audioPlaybackRtspPort = (rtspPortView.text.toString().toIntOrNull() ?: old.audioPlaybackRtspPort).coerceIn(1, 65_535),
             audioPlaybackUrl = playbackUrlView.text.toString().trim(),
             ttsEnabled = ttsEnabledView.isChecked,
             ttsPitch = (ttsPitchView.text.toString().toFloatOrNull() ?: old.ttsPitch).coerceIn(0.1f, 3.0f),
@@ -188,12 +194,15 @@ class AudioSettingsView(context: Context) : ScrollView(context) {
             ttsVolume = (ttsVolumeView.text.toString().toFloatOrNull() ?: old.ttsVolume).coerceIn(0f, 1f),
             hornEnabled = hornEnabledView.isChecked,
             hornVolume = (hornVolumeView.text.toString().toFloatOrNull() ?: old.hornVolume).coerceIn(0f, 1f),
+            hornSineGain = (hornSineGainView.text.toString().toFloatOrNull() ?: old.hornSineGain).coerceIn(0f, 4f),
+            hornSawGain = (hornSawGainView.text.toString().toFloatOrNull() ?: old.hornSawGain).coerceIn(0f, 4f),
             hornMaxDurationMs = (hornMaxDurationView.text.toString().toLongOrNull() ?: old.hornMaxDurationMs).coerceIn(100L, 60_000L),
         )
         RoverSettings.save(context, cfg)
         RoverRuntimeState.log(
             "UI saved AUDIO settings playback=${cfg.audioPlaybackEnabled} volume=${cfg.audioPlaybackVolume} " +
-                "cacheMs=${cfg.audioPlaybackNetworkCachingMs} tts=${cfg.ttsEnabled} horn=${cfg.hornEnabled} url=${effectiveUrl(cfg)}",
+                "cacheMs=${cfg.audioPlaybackNetworkCachingMs} tts=${cfg.ttsEnabled} horn=${cfg.hornEnabled} " +
+                "sineGain=${cfg.hornSineGain} sawGain=${cfg.hornSawGain} rtspPort=${cfg.mediaRtspPort} url=${effectiveUrl(cfg)}",
         )
         return cfg
     }
@@ -228,7 +237,9 @@ class AudioSettingsView(context: Context) : ScrollView(context) {
         val cfg = RoverSettings.load(context)
         runtimeView.text = buildString {
             appendLine("enabled       : ${cfg.audioPlaybackEnabled}")
+            appendLine("RTSP port     : ${cfg.mediaRtspPort} (shared)")
             appendLine("effective URL : ${effectiveUrl(cfg)}")
+            appendLine("horn cfg      : vol=${cfg.hornVolume} sine=${cfg.hornSineGain} saw=${cfg.hornSawGain} max=${cfg.hornMaxDurationMs}ms")
             appendLine()
             appendLine(AudioPlaybackRuntimeState.snapshot())
             appendLine()
