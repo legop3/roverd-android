@@ -166,7 +166,8 @@ object RoverAudioController {
             val increments = freqs.map { 2.0 * PI * it / rate }
             val maxFrames = (rate.toLong() * cfg.hornMaxDurationMs.coerceAtLeast(100L) / 1000L).coerceAtLeast(rate.toLong())
             var frame = 0L
-            val baseVolume = (cfg.hornVolume * hornGain).coerceIn(0f, 4f)
+            val waveformGain = if (waveform == "sine") cfg.hornSineGain else cfg.hornSawGain
+            val baseVolume = (cfg.hornVolume * hornGain * waveformGain).coerceIn(0f, 4f)
             while (!hornStop.get() && frame < maxFrames) {
                 for (i in chunk.indices) {
                     var sample = 0.0
