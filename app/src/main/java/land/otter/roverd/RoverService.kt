@@ -30,7 +30,7 @@ class RoverService : Service() {
     override fun onCreate() {
         super.onCreate()
         RoverRuntimeState.initialize(this)
-        installCrashLogger()
+        CrashLogger.install(this)
         startForeground(NOTIFICATION_ID, buildNotification("Starting rover"))
         acquireRuntimeLocks()
         startRuntime()
@@ -196,19 +196,4 @@ class RoverService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
-
-    private fun installCrashLogger() {
-        val previous = Thread.getDefaultUncaughtExceptionHandler()
-        if (previous is RoverCrashHandler) return
-        Thread.setDefaultUncaughtExceptionHandler(RoverCrashHandler(previous))
-    }
-
-    private class RoverCrashHandler(
-        private val previous: Thread.UncaughtExceptionHandler?,
-    ) : Thread.UncaughtExceptionHandler {
-        override fun uncaughtException(thread: Thread, throwable: Throwable) {
-            RoverRuntimeState.log("FATAL thread=${thread.name}: ${throwable.stackTraceToString()}")
-            previous?.uncaughtException(thread, throwable)
-        }
-    }
 }
