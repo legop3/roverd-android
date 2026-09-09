@@ -10,6 +10,8 @@ import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaRecorder
 import android.os.Build
+import android.util.Size
+import kotlin.math.roundToInt
 
 @TargetApi(21)
 object Camera2Diagnostics {
@@ -21,14 +23,17 @@ object Camera2Diagnostics {
             manager.cameraIdList.map { id ->
                 val c = manager.getCameraCharacteristics(id)
                 val facing = facingName(c.get(CameraCharacteristics.LENS_FACING))
-                val orientation = c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
                 val focal = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                    ?.joinToString("/") { "${it}mm" }
+                    ?.joinToString("/") { formatDecimal(it) }
                     .orEmpty()
-                val lens = if (focal.isBlank()) "focal length unknown" else "lens $focal"
+                val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                val largest = map?.getOutputSizes(SurfaceTexture::class.java)
+                    ?.maxByOrNull { it.width.toLong() * it.height.toLong() }
+                val lens = if (focal.isBlank()) "focal ?" else "${focal}mm"
+                val size = largest?.let { "max ${it.width}x${it.height}" } ?: "size ?"
                 CameraChoice(
                     id,
-                    "Camera ID $id — $facing — $lens — sensor mounted ${orientation}° from phone natural orientation",
+                    "ID $id — $facing — $lens — $size",
                 )
             }
         }.getOrElse { emptyList() }
@@ -41,11 +46,20 @@ object Camera2Diagnostics {
             val facing = facingName(c.get(CameraCharacteristics.LENS_FACING))
             val orientation = c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
             val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val sizes = map?.getOutputSizes(SurfaceTexture::class.java)
+
+            val rawSizes = map?.getOutputSizes(SurfaceTexture::class.java)
                 ?.map { CameraSizeOption(it.width, it.height) }
                 ?.distinctBy { it.width to it.height }
                 ?.sortedWith(compareByDescending<CameraSizeOption> { it.width.toLong() * it.height }.thenByDescending { it.width })
                 .orEmpty()
+            val encoders = h264SurfaceEncoderInfos()
+            val encodableSizes = rawSizes.filter { size ->
+                encoders.any { info -> supportsAvcSize(info, size.width, size.height) }
+            }
+            // Some vendor codecs report incomplete VideoCapabilities. Never make the camera unusable
+            // just because its codec metadata is broken; fall back to the raw SurfaceTexture list.
+            val sizes = encodableSizes.ifEmpty { rawSizes }
+
             val fps = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
                 ?.map { CameraFpsOption(it.lower, it.upper) }
                 ?.distinctBy { it.min to it.max }
@@ -72,7 +86,9 @@ object Camera2Diagnostics {
         }.getOrNull()
     }
 
-    fun h264SurfaceEncoders(): List<String> = runCatching {
+    fun h264SurfaceEncoders(): List<String> = h264SurfaceEncoderInfos().map { it.name }.distinct()
+
+    private fun h264SurfaceEncoderInfos(): List<MediaCodecInfo> = runCatching {
         MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
             .filter { it.isEncoder && it.supportedTypes.any { type -> type.equals("video/avc", true) } }
             .filter { info ->
@@ -81,9 +97,11 @@ object Camera2Diagnostics {
                         .colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 }.getOrDefault(false)
             }
-            .map { it.name }
-            .distinct()
     }.getOrElse { emptyList() }
+
+    private fun supportsAvcSize(info: MediaCodecInfo, width: Int, height: Int): Boolean = runCatching {
+        info.getCapabilitiesForType("video/avc").videoCapabilities.isSizeSupported(width, height)
+    }.getOrDefault(false)
 
     fun snapshot(context: Context): String {
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -95,7 +113,8 @@ object Camera2Diagnostics {
             appendLine("openable IDs   : ${if (ids.isEmpty()) "(none)" else ids.joinToString(", ")}")
             appendLine("camera count   : ${ids.size}")
             appendLine("NOTE           : Camera IDs are opaque Android identifiers, not lens numbers or zoom factors.")
-            appendLine("NOTE           : SENSOR_ORIENTATION is how the sensor is mounted inside the phone; it is not the stream rotation setting.")
+            appendLine("NOTE           : SENSOR_ORIENTATION is sensor mounting metadata, not a stream-rotation command.")
+            appendLine("H264 encoders  : ${h264SurfaceEncoders().joinToString().ifBlank { "(none reported)" }}")
 
             for (id in ids) {
                 appendLine()
@@ -136,9 +155,11 @@ object Camera2Diagnostics {
 
                 val map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 if (map != null) {
+                    val surfaceTextureSizes = runCatching { map.getOutputSizes(SurfaceTexture::class.java) }.getOrNull()
                     appendLine("OUTPUT MediaCodec=${formatSizes(runCatching { map.getOutputSizes(MediaCodec::class.java) }.getOrNull())}")
                     appendLine("OUTPUT MediaRecorder=${formatSizes(runCatching { map.getOutputSizes(MediaRecorder::class.java) }.getOrNull())}")
-                    appendLine("OUTPUT SurfaceTexture=${formatSizes(runCatching { map.getOutputSizes(SurfaceTexture::class.java) }.getOrNull())}")
+                    appendLine("OUTPUT SurfaceTexture=${formatSizes(surfaceTextureSizes)}")
+                    appendLine("H264-ENCODABLE SurfaceTexture=${formatEncodableSizes(surfaceTextureSizes)}")
                 } else {
                     appendLine("SCALER_STREAM_CONFIGURATION_MAP=null")
                 }
@@ -152,6 +173,15 @@ object Camera2Diagnostics {
                 }
             }
         }
+    }
+
+    private fun formatEncodableSizes(values: Array<Size>?): String {
+        if (values == null) return "null/unsupported"
+        val encoders = h264SurfaceEncoderInfos()
+        return values
+            .filter { size -> encoders.any { supportsAvcSize(it, size.width, size.height) } }
+            .joinToString(", ") { "${it.width}x${it.height}" }
+            .ifBlank { "(none reported by codec capabilities)" }
     }
 
     @TargetApi(28)
@@ -190,8 +220,15 @@ object Camera2Diagnostics {
         else -> "UNKNOWN"
     }
 
-    private fun formatSizes(values: Array<android.util.Size>?): String =
+    private fun formatSizes(values: Array<Size>?): String =
         values?.joinToString(", ") { "${it.width}x${it.height}" } ?: "null/unsupported"
+
+    private fun formatDecimal(value: Float): String {
+        val hundredths = (value * 100f).roundToInt()
+        return if (hundredths % 100 == 0) (hundredths / 100).toString()
+        else if (hundredths % 10 == 0) String.format(java.util.Locale.US, "%.1f", value)
+        else String.format(java.util.Locale.US, "%.2f", value)
+    }
 
     private fun formatValue(value: Any?): String = when (value) {
         null -> "null"
