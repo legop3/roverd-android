@@ -68,6 +68,20 @@ class RoverServerClient(
             .put("initialOn", false)
             .put("activeLow", false)
 
+        val video = JSONObject().put("enabled", config.cameraEnabled)
+        if (config.cameraEnabled) {
+            runCatching {
+                video
+                    .put("service", "android-camera")
+                    .put("publisher", "android-mediacodec")
+                    .put("publishUrl", MediaUrl.videoPublishUrl(config))
+                    .put("device", config.cameraId)
+            }.onFailure {
+                RoverRuntimeState.log("CAMERA hello publish URL failure: ${it.stackTraceToString()}")
+                video.put("enabled", false)
+            }
+        }
+
         val hello = JSONObject()
             .put("type", "hello")
             .put("name", config.name)
@@ -80,7 +94,7 @@ class RoverServerClient(
             .put("maxWheelSpeed", config.maxWheelSpeed)
             .put("media", JSONObject()
                 .put("manage", false)
-                .put("video", JSONObject().put("enabled", false))
+                .put("video", video)
                 .put("audioCapture", JSONObject().put("enabled", false))
                 .put("audioPlayback", JSONObject().put("enabled", false)))
             .put("cameraServo", JSONObject().put("enabled", false))
