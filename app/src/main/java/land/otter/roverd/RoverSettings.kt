@@ -35,6 +35,19 @@ data class RoverConfig(
     val micNoiseSuppressor: Boolean,
     val micRtspPort: Int,
     val micPublishUrl: String,
+    val audioPlaybackEnabled: Boolean,
+    val audioPlaybackVolume: Int,
+    val audioPlaybackNetworkCachingMs: Int,
+    val audioPlaybackRtspPort: Int,
+    val audioPlaybackUrl: String,
+    val ttsEnabled: Boolean,
+    val ttsPitch: Float,
+    val ttsRate: Float,
+    val ttsVoice: String,
+    val ttsVolume: Float,
+    val hornEnabled: Boolean,
+    val hornVolume: Float,
+    val hornMaxDurationMs: Long,
 ) {
     val cameraFps: Int get() = cameraFpsMax
 }
@@ -82,6 +95,19 @@ object RoverSettings {
             micNoiseSuppressor = p.getBoolean("micNoiseSuppressor", false),
             micRtspPort = p.getInt("micRtspPort", 8554),
             micPublishUrl = p.getString("micPublishUrl", "") ?: "",
+            audioPlaybackEnabled = p.getBoolean("audioPlaybackEnabled", true),
+            audioPlaybackVolume = p.getInt("audioPlaybackVolume", 100).coerceIn(0, 200),
+            audioPlaybackNetworkCachingMs = p.getInt("audioPlaybackNetworkCachingMs", 100).coerceIn(0, 2_000),
+            audioPlaybackRtspPort = p.getInt("audioPlaybackRtspPort", 8554),
+            audioPlaybackUrl = p.getString("audioPlaybackUrl", "") ?: "",
+            ttsEnabled = p.getBoolean("ttsEnabled", true),
+            ttsPitch = p.getFloat("ttsPitch", 1.0f).coerceIn(0.1f, 3.0f),
+            ttsRate = p.getFloat("ttsRate", 1.0f).coerceIn(0.25f, 3.0f),
+            ttsVoice = p.getString("ttsVoice", "") ?: "",
+            ttsVolume = p.getFloat("ttsVolume", 1.0f).coerceIn(0f, 1f),
+            hornEnabled = p.getBoolean("hornEnabled", true),
+            hornVolume = p.getFloat("hornVolume", 0.25f).coerceIn(0f, 1f),
+            hornMaxDurationMs = p.getLong("hornMaxDurationMs", 10_000L).coerceIn(100L, 60_000L),
         )
     }
 
@@ -120,6 +146,19 @@ object RoverSettings {
             .putBoolean("micNoiseSuppressor", config.micNoiseSuppressor)
             .putInt("micRtspPort", config.micRtspPort)
             .putString("micPublishUrl", config.micPublishUrl)
+            .putBoolean("audioPlaybackEnabled", config.audioPlaybackEnabled)
+            .putInt("audioPlaybackVolume", config.audioPlaybackVolume)
+            .putInt("audioPlaybackNetworkCachingMs", config.audioPlaybackNetworkCachingMs)
+            .putInt("audioPlaybackRtspPort", config.audioPlaybackRtspPort)
+            .putString("audioPlaybackUrl", config.audioPlaybackUrl)
+            .putBoolean("ttsEnabled", config.ttsEnabled)
+            .putFloat("ttsPitch", config.ttsPitch)
+            .putFloat("ttsRate", config.ttsRate)
+            .putString("ttsVoice", config.ttsVoice)
+            .putFloat("ttsVolume", config.ttsVolume)
+            .putBoolean("hornEnabled", config.hornEnabled)
+            .putFloat("hornVolume", config.hornVolume)
+            .putLong("hornMaxDurationMs", config.hornMaxDurationMs)
             .apply()
     }
 }
