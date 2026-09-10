@@ -14,14 +14,12 @@ import android.os.Looper
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
-import kotlin.math.min
 
 class AudioPlaybackService : Service() {
     companion object {
         private const val CHANNEL_ID = "roverd-audio-playback"
         private const val NOTIFICATION_ID = 4
-        private const val RESTART_BASE_MS = 1_000L
-        private const val RESTART_MAX_MS = 15_000L
+        private const val RESTART_MS = 2_000L
 
         const val ACTION_START = "audio_playback_start"
         const val ACTION_RESTART = "audio_playback_restart"
@@ -178,13 +176,13 @@ class AudioPlaybackService : Service() {
 
     private fun scheduleRestart(reason: String) {
         if (manualStop || destroying || !RoverSettings.load(this).audioPlaybackEnabled || pendingRestart != null) return
-        val attempt = restartAttempt++
-        val delay = min(RESTART_BASE_MS * (1L shl attempt.coerceAtMost(4)), RESTART_MAX_MS)
+        val attempt = ++restartAttempt
+        val delay = RESTART_MS
         AudioPlaybackRuntimeState.reconnects += 1
         AudioPlaybackRuntimeState.playing = false
         AudioPlaybackRuntimeState.state = "Reconnecting in ${delay}ms"
         AudioPlaybackRuntimeState.lastError = reason
-        RoverRuntimeState.log("AUDIO playback restart in ${delay}ms attempt=${attempt + 1}: $reason")
+        RoverRuntimeState.log("AUDIO playback restart in ${delay}ms attempt=$attempt fixed-delay: $reason")
         updateNotification("Reverse audio reconnecting")
         val task = Runnable {
             pendingRestart = null
