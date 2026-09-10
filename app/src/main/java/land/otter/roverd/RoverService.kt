@@ -4,9 +4,12 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.wifi.WifiManager
+import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -29,6 +32,8 @@ class RoverService : Service() {
     private var autoCharge: AutoChargeController? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var batteryReceiver: BroadcastReceiver? = null
+    private var lastPhoneBatteryLevel: Int? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -37,6 +42,7 @@ class RoverService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification("Starting rover"))
         acquireRuntimeLocks()
         startRuntime()
+        startBatteryMonitor()
     }
 
     private fun startRuntime() {
@@ -57,14 +63,7 @@ class RoverService : Service() {
                 }
                 activeRoomba.seekDock()
             },
-            emitEvent = { event, data ->
-                val activeServer = server
-                if (activeServer != null) {
-                    activeServer.sendEvent(event, data)
-                } else {
-                    RoverRuntimeState.log("EVENT event=$event data=$data (server unavailable)")
-                }
-            },
+            emitEvent = ::emitEvent,
         )
 
         startServer(config)
@@ -81,6 +80,74 @@ class RoverService : Service() {
                 RoverRuntimeState.log("USB optional subsystem connected=$connected")
             },
         ).also { it.connect() }
+    }
+
+    private fun emitEvent(event: String, data: Map<String, Any>) {
+        val activeServer = server
+        if (activeServer != null) {
+            activeServer.sendEvent(event, data)
+        } else {
+            RoverRuntimeState.log("EVENT event=$event data=$data (server unavailable)")
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun startBatteryMonitor() {
+        if (batteryReceiver != null) return
+
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action != Intent.ACTION_BATTERY_CHANGED) return
+
+                val rawLevel = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+                if (rawLevel < 0 || scale <= 0) return
+
+                val levelPercent = ((rawLevel * 100) / scale).coerceIn(0, 100)
+                if (lastPhoneBatteryLevel == levelPercent) return
+                lastPhoneBatteryLevel = levelPercent
+
+                val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
+                val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)
+                val charging = status == BatteryManager.BATTERY_STATUS_CHARGING ||
+                    status == BatteryManager.BATTERY_STATUS_FULL
+
+                RoverRuntimeState.log(
+                    "PHONE BATTERY level=${levelPercent}% charging=$charging plugged=$plugged status=$status",
+                )
+                emitEvent(
+                    "phoneBattery.levelChanged ${levelPercent}%",
+                    mapOf(
+                        "levelPercent" to levelPercent,
+                        "charging" to charging,
+                        "plugged" to (plugged != 0),
+                        "plugType" to plugged,
+                        "status" to status,
+                    ),
+                )
+            }
+        }
+
+        batteryReceiver = receiver
+        val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(receiver, filter)
+            }
+        }.onFailure {
+            batteryReceiver = null
+            RoverRuntimeState.log("PHONE BATTERY monitor registration failed: ${it.stackTraceToString()}")
+        }
+    }
+
+    private fun stopBatteryMonitor() {
+        val receiver = batteryReceiver ?: return
+        runCatching { unregisterReceiver(receiver) }
+            .onFailure { RoverRuntimeState.log("PHONE BATTERY monitor unregister failed: ${it.message}") }
+        batteryReceiver = null
+        lastPhoneBatteryLevel = null
     }
 
     private fun startServer(config: RoverConfig = RoverSettings.load(this)) {
@@ -254,6 +321,7 @@ class RoverService : Service() {
     }
 
     override fun onDestroy() {
+        stopBatteryMonitor()
         stopRuntime()
         releaseRuntimeLocks()
         RoverRuntimeState.update("Stopped")
