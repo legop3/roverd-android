@@ -29,7 +29,6 @@
 
         <activity
             android:name=".StatusActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"
             android:exported="true"
             android:launchMode="singleTop">
             <intent-filter>
