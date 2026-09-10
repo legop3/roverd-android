@@ -30,6 +30,7 @@ class RoverService : Service() {
     private var roomba: UsbRoomba? = null
     private var server: RoverServerClient? = null
     private var autoCharge: AutoChargeController? = null
+    private var wifiRecoveryWatchdog: WifiRecoveryWatchdog? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var batteryReceiver: BroadcastReceiver? = null
@@ -43,6 +44,7 @@ class RoverService : Service() {
         acquireRuntimeLocks()
         startRuntime()
         startBatteryMonitor()
+        startWifiRecoveryWatchdog()
     }
 
     private fun startRuntime() {
@@ -150,13 +152,32 @@ class RoverService : Service() {
         lastPhoneBatteryLevel = null
     }
 
+    private fun startWifiRecoveryWatchdog() {
+        if (wifiRecoveryWatchdog != null) return
+        wifiRecoveryWatchdog = WifiRecoveryWatchdog(
+            context = this,
+            serverConnected = { RoverRuntimeState.serverConnected },
+            emitEvent = ::emitEvent,
+        ).also { it.start() }
+    }
+
+    private fun stopWifiRecoveryWatchdog() {
+        wifiRecoveryWatchdog?.stop()
+        wifiRecoveryWatchdog = null
+    }
+
     private fun startServer(config: RoverConfig = RoverSettings.load(this)) {
         stopServer()
         server = RoverServerClient(
             context = this,
             config = config,
             roombaProvider = { roomba },
-            onStatus = ::status,
+            onStatus = { message ->
+                status(message)
+                if (message == "Server connected") {
+                    wifiRecoveryWatchdog?.onServerConnected()
+                }
+            },
         ).also { it.start() }
     }
 
@@ -321,6 +342,7 @@ class RoverService : Service() {
     }
 
     override fun onDestroy() {
+        stopWifiRecoveryWatchdog()
         stopBatteryMonitor()
         stopRuntime()
         releaseRuntimeLocks()
