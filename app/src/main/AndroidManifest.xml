@@ -70,18 +70,6 @@
             android:foregroundServiceType="mediaPlayback" />
 
         <receiver
-            android:name=".RoverDeviceAdminReceiver"
-            android:exported="true"
-            android:permission="android.permission.BIND_DEVICE_ADMIN">
-            <meta-data
-                android:name="android.app.device_admin"
-                android:resource="@xml/rover_device_admin" />
-            <intent-filter>
-                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
-            </intent-filter>
-        </receiver>
-
-        <receiver
             android:name=".BootReceiver"
             android:enabled="true"
             android:exported="true">
