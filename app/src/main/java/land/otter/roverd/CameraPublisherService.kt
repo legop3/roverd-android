@@ -12,15 +12,13 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import kotlin.math.min
 
 class CameraPublisherService : Service() {
     companion object {
         private const val CHANNEL_ID = "roverd-camera"
         private const val NOTIFICATION_ID = 2
 
-        private const val AUTO_RESTART_BASE_MS = 2_000L
-        private const val AUTO_RESTART_MAX_MS = 30_000L
+        private const val AUTO_RESTART_MS = 2_000L
 
         const val ACTION_START = "camera_start"
         const val ACTION_RESTART = "camera_restart"
@@ -131,16 +129,15 @@ class CameraPublisherService : Service() {
         if (!allowAutoRestart || destroying || !RoverSettings.load(this).cameraEnabled) return
         if (pendingRestart != null) return
 
-        val attempt = restartAttempt++
-        val shift = attempt.coerceAtMost(4)
-        val delay = min(AUTO_RESTART_BASE_MS * (1L shl shift), AUTO_RESTART_MAX_MS)
+        val attempt = ++restartAttempt
+        val delay = AUTO_RESTART_MS
         RoverRuntimeState.recordCameraReconnect()
         RoverRuntimeState.setCameraPipelineState(
             running = false,
             state = "Restarting camera in ${delay}ms",
             error = reason,
         )
-        RoverRuntimeState.log("CAMERA full pipeline restart scheduled in ${delay}ms attempt=${attempt + 1}: $reason")
+        RoverRuntimeState.log("CAMERA full pipeline restart scheduled in ${delay}ms attempt=$attempt fixed-delay: $reason")
         updateNotification("Camera recovering in ${delay / 1000}s")
 
         val task = Runnable {
