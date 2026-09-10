@@ -24,6 +24,7 @@ import android.widget.GridLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import kotlin.math.floor
 
 class StatusActivity : Activity() {
     companion object {
@@ -36,6 +37,7 @@ class StatusActivity : Activity() {
     private enum class Health { GOOD, WARN, BAD, OFF }
 
     private data class StatusRowViews(
+        val background: GradientDrawable,
         val dot: TextView,
         val value: TextView,
         val detail: TextView,
@@ -44,6 +46,7 @@ class StatusActivity : Activity() {
     private lateinit var roverNameView: TextView
     private lateinit var overallView: TextView
     private lateinit var runtimeMessageView: TextView
+    private lateinit var overallBackground: GradientDrawable
 
     private val rows = linkedMapOf<String, StatusRowViews>()
     private val handler = Handler(Looper.getMainLooper())
@@ -61,8 +64,6 @@ class StatusActivity : Activity() {
         RoverRuntimeState.initialize(this)
         setContentView(buildDashboard())
 
-        // The status screen is the appliance entry point: every app launch re-asserts that all
-        // configured long-running services should be alive. Each service is idempotent on START.
         ensureConfiguredServices()
         runFirstLaunchProvisioningIfNeeded()
     }
@@ -75,8 +76,6 @@ class StatusActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        // Starting camera/microphone foreground services from a visible activity is required on
-        // modern Android because their runtime permissions are while-in-use permissions.
         ensureConfiguredServices()
         refreshStatus()
     }
@@ -88,8 +87,6 @@ class StatusActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        // Keep the dashboard itself completely read-only. System Back is the route to the
-        // existing configuration UI when maintenance is needed.
         startActivity(Intent(this, MainActivity::class.java))
         finish()
     }
@@ -104,25 +101,28 @@ class StatusActivity : Activity() {
         val heightDp = if (config.screenHeightDp > 0) config.screenHeightDp else (resources.displayMetrics.heightPixels / density).toInt()
         val landscape = config.orientation == Configuration.ORIENTATION_LANDSCAPE
 
-        // Phones naturally land at 2 columns in portrait and 3-4 in landscape. Larger screens
-        // gain columns instead of simply stretching giant cards across the display.
-        val columns = when {
-            widthDp >= 900 -> 5
-            widthDp >= 700 -> 4
+        val outerPadDp = if (widthDp >= 700) 14f else 8f
+        val gapDp = if (widthDp >= 700) 8f else 6f
+        val availableWidthDp = widthDp - outerPadDp * 2f
+
+        // Pick a column count from both width and aspect ratio. Cards stay near a useful physical
+        // size instead of growing with the display height.
+        val maxColumnsByWidth = floor((availableWidthDp + gapDp) / (148f + gapDp)).toInt().coerceIn(1, 6)
+        val preferredColumns = when {
+            widthDp >= 950 && landscape -> 5
+            landscape -> 4
+            widthDp >= 720 -> 4
             widthDp >= 500 -> 3
             else -> 2
         }
-        val uiScale = minOf(widthDp / 390f, heightDp / if (landscape) 420f else 720f).coerceIn(0.78f, 1.30f)
-        val outerPadDp = if (widthDp >= 600) 18f else 10f
-        val gapDp = if (widthDp >= 600) 10f else 7f
-        val availableWidthDp = widthDp - (outerPadDp * 2f)
-        val cardWidthDp = ((availableWidthDp - gapDp * (columns - 1)) / columns).coerceAtLeast(120f)
-        val cardMinHeightDp = when {
-            landscape && heightDp < 430 -> 76f
-            landscape -> 86f
-            heightDp < 700 -> 90f
-            else -> 102f
-        } * uiScale.coerceAtLeast(0.88f)
+        val columns = minOf(maxColumnsByWidth, preferredColumns).coerceAtLeast(if (widthDp >= 300) 2 else 1)
+        val cardWidthDp = ((availableWidthDp - gapDp * (columns - 1)) / columns).coerceAtLeast(138f)
+        val textScale = (cardWidthDp / 180f).coerceIn(0.92f, 1.18f)
+        val cardHeightDp = when {
+            landscape && heightDp < 400 -> 82f
+            landscape -> 88f
+            else -> 94f
+        } * textScale.coerceIn(0.94f, 1.10f)
 
         val scroll = ScrollView(this).apply {
             setBackgroundColor(Color.parseColor("#0D1117"))
@@ -130,7 +130,7 @@ class StatusActivity : Activity() {
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(outerPadDp), dp(if (landscape) 10f else 16f), dp(outerPadDp), dp(12f))
+            setPadding(dp(outerPadDp), dp(if (landscape) 7f else 10f), dp(outerPadDp), dp(8f))
         }
         scroll.addView(root)
 
@@ -140,64 +140,65 @@ class StatusActivity : Activity() {
         }
         val identity = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, 0, if (landscape) dp(12f) else 0, if (landscape) 0 else dp(10f))
+            setPadding(0, 0, if (landscape) dp(10f) else 0, if (landscape) 0 else dp(7f))
         }
         identity.addView(TextView(this).apply {
             text = "ROVERD"
-            textSize = 11f * uiScale
+            textSize = 12f * textScale
             setTextColor(Color.parseColor("#8B949E"))
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            if (Build.VERSION.SDK_INT >= 21) letterSpacing = 0.15f
+            if (Build.VERSION.SDK_INT >= 21) letterSpacing = 0.12f
         })
         roverNameView = TextView(this).apply {
-            textSize = 28f * uiScale
+            textSize = 26f * textScale
             setTextColor(Color.WHITE)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(1f), 0, 0)
         }
         identity.addView(roverNameView)
         identity.addView(TextView(this).apply {
             text = "Dedicated rover runtime"
-            textSize = 12f * uiScale
+            textSize = 12f * textScale
             setTextColor(Color.parseColor("#8B949E"))
             maxLines = 1
         })
         header.addView(
             identity,
-            if (landscape) LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.40f)
+            if (landscape) LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.42f)
             else LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT),
         )
 
+        overallBackground = roundedBackground("#30363D", dp(10f))
         val overallCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12f), dp(if (landscape) 8f else 11f), dp(12f), dp(if (landscape) 8f else 11f))
-            background = roundedBackground("#161B22", dp(12f))
+            setPadding(dp(11f), dp(if (landscape) 7f else 9f), dp(11f), dp(if (landscape) 7f else 9f))
+            background = overallBackground
         }
         overallView = TextView(this).apply {
+            setTextColor(Color.WHITE)
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            setAutoSize(this, 11, (19f * uiScale).toInt().coerceAtLeast(14))
+            setAutoSize(this, 14, (20f * textScale).toInt().coerceAtLeast(17))
         }
         runtimeMessageView = TextView(this).apply {
-            setTextColor(Color.parseColor("#C9D1D9"))
+            setTextColor(Color.parseColor("#F0F6FC"))
             maxLines = if (landscape) 1 else 2
             ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(3f), 0, 0)
-            setAutoSize(this, 8, (11f * uiScale).toInt().coerceAtLeast(9))
+            setPadding(0, dp(2f), 0, 0)
+            setAutoSize(this, 10, (13f * textScale).toInt().coerceAtLeast(11))
         }
         overallCard.addView(overallView)
         overallCard.addView(runtimeMessageView)
         header.addView(
             overallCard,
-            if (landscape) LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.60f)
+            if (landscape) LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.58f)
             else LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT),
         )
         root.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dp(if (landscape) 9f else 11f)
+            bottomMargin = dp(7f)
         })
 
         val entries = listOf(
@@ -228,13 +229,12 @@ class StatusActivity : Activity() {
                 key = key,
                 section = section,
                 label = label,
-                uiScale = uiScale,
-                minHeight = dp(cardMinHeightDp),
-                radius = dp(11f),
+                textScale = textScale,
+                radius = dp(9f),
             )
             grid.addView(card, GridLayout.LayoutParams(GridLayout.spec(rowIndex), GridLayout.spec(columnIndex)).apply {
                 width = dp(cardWidthDp)
-                height = GridLayout.LayoutParams.WRAP_CONTENT
+                height = dp(cardHeightDp)
                 if (columnIndex > 0) leftMargin = dp(gapDp)
                 if (rowIndex > 0) topMargin = dp(gapDp)
             })
@@ -243,10 +243,10 @@ class StatusActivity : Activity() {
 
         root.addView(TextView(this).apply {
             text = "Live status • 0.5 s refresh • Back opens configuration"
-            textSize = (9f * uiScale).coerceAtLeast(8f)
+            textSize = 10f * textScale
             setTextColor(Color.parseColor("#6E7681"))
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, dp(8f), 0, 0)
+            setPadding(0, dp(6f), 0, 0)
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         })
@@ -258,19 +258,18 @@ class StatusActivity : Activity() {
         key: String,
         section: String,
         label: String,
-        uiScale: Float,
-        minHeight: Int,
+        textScale: Float,
         radius: Int,
     ): View {
         val density = resources.displayMetrics.density
         fun dp(value: Float) = (value * density + 0.5f).toInt()
 
+        val cardBackground = roundedBackground("#30363D", radius)
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = minHeight
-            setPadding(dp(10f), dp(8f), dp(10f), dp(8f))
-            background = roundedBackground("#161B22", radius)
+            setPadding(dp(9f), dp(6f), dp(9f), dp(6f))
+            background = cardBackground
         }
 
         val topLine = LinearLayout(this).apply {
@@ -279,18 +278,18 @@ class StatusActivity : Activity() {
         }
         val dot = TextView(this).apply {
             text = "●"
+            textSize = 23f * textScale
             gravity = Gravity.CENTER
-            setAutoSize(this, 10, (15f * uiScale).toInt().coerceAtLeast(11))
         }
-        topLine.addView(dot, LinearLayout.LayoutParams(dp(20f), LinearLayout.LayoutParams.WRAP_CONTENT))
+        topLine.addView(dot, LinearLayout.LayoutParams(dp(27f * textScale), LinearLayout.LayoutParams.WRAP_CONTENT))
         topLine.addView(TextView(this).apply {
             text = "$section · $label"
-            setTextColor(Color.parseColor("#8B949E"))
+            setTextColor(Color.parseColor("#F0F6FC"))
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-            maxLines = 2
+            maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            if (Build.VERSION.SDK_INT >= 21) letterSpacing = 0.04f
-            setAutoSize(this, 7, (10f * uiScale).toInt().coerceAtLeast(8))
+            if (Build.VERSION.SDK_INT >= 21) letterSpacing = 0.03f
+            setAutoSize(this, 10, (13f * textScale).toInt().coerceAtLeast(11))
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         val valueView = TextView(this).apply {
@@ -298,21 +297,21 @@ class StatusActivity : Activity() {
             typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(3f), 0, 0)
-            setAutoSize(this, 9, (15f * uiScale).toInt().coerceAtLeast(11))
+            setPadding(0, dp(1f), 0, 0)
+            setAutoSize(this, 14, (20f * textScale).toInt().coerceAtLeast(17))
         }
         val detailView = TextView(this).apply {
-            setTextColor(Color.parseColor("#8B949E"))
-            maxLines = 2
+            setTextColor(Color.parseColor("#F0F6FC"))
+            maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(2f), 0, 0)
-            setAutoSize(this, 7, (10f * uiScale).toInt().coerceAtLeast(8))
+            setPadding(0, dp(1f), 0, 0)
+            setAutoSize(this, 10, (13f * textScale).toInt().coerceAtLeast(11))
         }
 
         card.addView(topLine)
         card.addView(valueView)
         card.addView(detailView)
-        rows[key] = StatusRowViews(dot, valueView, detailView)
+        rows[key] = StatusRowViews(cardBackground, dot, valueView, detailView)
         return card
     }
 
@@ -459,23 +458,35 @@ class StatusActivity : Activity() {
         if (cfg.audioPlaybackEnabled) requiredHealth += AudioPlaybackRuntimeState.running && AudioPlaybackRuntimeState.playing
 
         val healthy = requiredHealth.all { it }
+        val overallHealth = if (healthy) Health.GOOD else Health.WARN
         overallView.text = if (healthy) "●  ALL SYSTEMS ONLINE" else "●  RECOVERING / DEGRADED"
-        overallView.setTextColor(healthColor(if (healthy) Health.GOOD else Health.WARN))
+        overallView.setTextColor(Color.WHITE)
+        overallBackground.setColor(cardBackgroundColor(overallHealth))
     }
 
     private fun setRow(key: String, health: Health, value: String, detail: String) {
         val row = rows[key] ?: return
-        row.dot.setTextColor(healthColor(health))
+        row.background.setColor(cardBackgroundColor(health))
+        row.dot.setTextColor(healthAccentColor(health))
         row.value.text = value
         row.detail.text = detail
     }
 
-    private fun healthColor(health: Health): Int = Color.parseColor(
+    private fun cardBackgroundColor(health: Health): Int = Color.parseColor(
         when (health) {
-            Health.GOOD -> "#3FB950"
-            Health.WARN -> "#D29922"
-            Health.BAD -> "#F85149"
-            Health.OFF -> "#6E7681"
+            Health.GOOD -> "#1F6F3D"
+            Health.WARN -> "#8A5A00"
+            Health.BAD -> "#9B2C2C"
+            Health.OFF -> "#30363D"
+        },
+    )
+
+    private fun healthAccentColor(health: Health): Int = Color.parseColor(
+        when (health) {
+            Health.GOOD -> "#7EE787"
+            Health.WARN -> "#E3B341"
+            Health.BAD -> "#FF7B72"
+            Health.OFF -> "#8B949E"
         },
     )
 
@@ -552,8 +563,6 @@ class StatusActivity : Activity() {
 
     private fun finishRuntimePermissionProvisioning() {
         firstRunPromptInFlight = false
-        // Record that automatic provisioning was attempted so a refusal does not become a popup
-        // on every ordinary app launch. Missing items remain visible on the status dashboard.
         getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_PROVISIONING_ATTEMPTED, true)
