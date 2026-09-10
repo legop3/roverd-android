@@ -27,6 +27,7 @@ class UsbRoomba(
 
     companion object {
         private const val ACTION_USB_PERMISSION = "land.otter.roverd.USB_PERMISSION"
+        private const val USB_RETRY_MS = 2_000L
         private const val SENSOR_SILENCE_MS = 5_000L
         private const val SENSOR_RECOVERY_COOLDOWN_MS = 3_000L
         private const val SENSOR_COMMAND_PAUSE_MS = 50L
@@ -48,28 +49,41 @@ class UsbRoomba(
     @Volatile private var sensorStreamWanted = true
     @Volatile private var pendingPermissionDeviceId = -1
     @Volatile private var pendingPermissionPortIndex = 0
+    @Volatile private var deniedPermissionDeviceId = -1
     private var brcTask: ScheduledFuture<*>? = null
     private var sensorWatchdogTask: ScheduledFuture<*>? = null
+    private var connectRetryTask: ScheduledFuture<*>? = null
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 ACTION_USB_PERMISSION -> {
                     val device = intent.usbDevice()
+                    val requestedDeviceId = pendingPermissionDeviceId
+                    val requestedPortIndex = pendingPermissionPortIndex
+                    pendingPermissionDeviceId = -1
                     if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) && device != null) {
-                        val portIndex = if (device.deviceId == pendingPermissionDeviceId) pendingPermissionPortIndex else selectedPortIndex(device)
+                        deniedPermissionDeviceId = -1
+                        val portIndex = if (device.deviceId == requestedDeviceId) requestedPortIndex else selectedPortIndex(device)
                         openDevice(device, portIndex)
                     } else {
-                        onStatus("USB permission denied")
+                        if (device != null) deniedPermissionDeviceId = device.deviceId
+                        onStatus("USB permission denied; waiting for reattach or app restart")
                     }
-                    pendingPermissionDeviceId = -1
                 }
-                UsbManager.ACTION_USB_DEVICE_ATTACHED -> connect()
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    deniedPermissionDeviceId = -1
+                    connect()
+                }
                 UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                     val detached = intent.usbDevice()
-                    if (detached != null && detached.deviceId == port?.device?.deviceId) {
-                        closePort()
-                        onStatus("USB serial detached")
+                    if (detached != null) {
+                        if (detached.deviceId == pendingPermissionDeviceId) pendingPermissionDeviceId = -1
+                        if (detached.deviceId == deniedPermissionDeviceId) deniedPermissionDeviceId = -1
+                        if (detached.deviceId == port?.device?.deviceId) {
+                            closePort()
+                            onStatus("USB serial detached; retrying every ${USB_RETRY_MS}ms")
+                        }
                     }
                 }
             }
@@ -88,12 +102,25 @@ class UsbRoomba(
             @Suppress("DEPRECATION")
             context.registerReceiver(receiver, filter)
         }
+
+        connectRetryTask = scheduler.scheduleWithFixedDelay(
+            {
+                if (port == null) {
+                    runCatching { connect() }
+                        .onFailure { RoverRuntimeState.log("USB fixed-delay retry failed: ${it.stackTraceToString()}") }
+                }
+            },
+            USB_RETRY_MS,
+            USB_RETRY_MS,
+            TimeUnit.MILLISECONDS,
+        )
     }
 
     fun isConnected(): Boolean = port != null
 
+    @Synchronized
     fun connect() {
-        if (port != null) return
+        if (port != null || pendingPermissionDeviceId != -1) return
         val drivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
         RoverRuntimeState.log("USB probe found ${drivers.size} supported serial driver(s), preference=${config.usbSerialPreference}")
 
@@ -105,9 +132,9 @@ class UsbRoomba(
 
         if (selected == null) {
             if (drivers.isEmpty()) {
-                onStatus("No supported USB serial adapter found")
+                onStatus("No supported USB serial adapter found — retrying")
             } else {
-                onStatus("Selected USB serial adapter not found: ${config.usbSerialPreference}")
+                onStatus("Selected USB serial adapter not found: ${config.usbSerialPreference} — retrying")
                 RoverRuntimeState.log(
                     "USB selected adapter missing preference=${config.usbSerialPreference} available=" +
                         drivers.flatMap { d -> d.ports.indices.map { i -> UsbSerialSelector.key(d.device.vendorId, d.device.productId, i) } }.joinToString(),
@@ -126,6 +153,10 @@ class UsbRoomba(
         )
 
         if (!usbManager.hasPermission(device)) {
+            if (deniedPermissionDeviceId == device.deviceId) {
+                onStatus("USB permission denied for $key — waiting for reattach or app restart")
+                return
+            }
             pendingPermissionDeviceId = device.deviceId
             pendingPermissionPortIndex = portIndex
             val permissionIntent = PendingIntent.getBroadcast(
@@ -148,6 +179,7 @@ class UsbRoomba(
         } ?: 0
     }
 
+    @Synchronized
     private fun openDevice(device: UsbDevice, portIndex: Int) {
         if (port != null) return
         val driver = UsbSerialProber.getDefaultProber().probeDevice(device)
@@ -161,7 +193,7 @@ class UsbRoomba(
         }
         val connection = usbManager.openDevice(device)
         if (connection == null) {
-            onStatus("Could not open USB device")
+            onStatus("Could not open USB device — retrying")
             return
         }
         try {
@@ -205,7 +237,7 @@ class UsbRoomba(
         } catch (t: Throwable) {
             runCatching { connection.close() }
             closePort()
-            onStatus("USB serial open failed: ${t.message}")
+            onStatus("USB serial open failed: ${t.message} — retrying")
             RoverRuntimeState.log("USB open exception: ${t.stackTraceToString()}")
         }
     }
@@ -249,6 +281,7 @@ class UsbRoomba(
     fun reconnect() {
         RoverRuntimeState.log("MANUAL USB reconnect")
         closePort()
+        deniedPermissionDeviceId = -1
         connect()
     }
 
@@ -349,14 +382,13 @@ class UsbRoomba(
     }
 
     override fun onRunError(e: Exception) {
-        onStatus("USB serial read error: ${e.message}")
+        onStatus("USB serial read error: ${e.message} — retrying")
         RoverRuntimeState.log("USB read exception: ${e.stackTraceToString()}")
         closePort()
-        runCatching {
-            scheduler.schedule({ connect() }, 2, TimeUnit.SECONDS)
-        }
+        // The lifetime fixed-delay reconnect task will keep probing until the adapter reappears.
     }
 
+    @Synchronized
     private fun closePort() {
         val p = port
         val wasConnected = p != null
@@ -379,6 +411,8 @@ class UsbRoomba(
     }
 
     override fun close() {
+        connectRetryTask?.cancel(false)
+        connectRetryTask = null
         closePort()
         scheduler.shutdownNow()
         runCatching { context.unregisterReceiver(receiver) }

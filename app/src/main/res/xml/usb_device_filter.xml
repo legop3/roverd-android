@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dedicated rover phones may use FTDI, CH34x, CP210x, PL2303 or CDC ACM adapters.
+         Matching all USB devices lets Android offer Roverd as the default handler; UsbRoomba still
+         filters the actual device through usb-serial-for-android and the configured selection. -->
+    <usb-device />
+</resources>

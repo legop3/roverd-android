@@ -17,14 +17,12 @@ import com.pedro.common.ConnectChecker
 import com.pedro.encoder.utils.CodecUtil
 import com.pedro.library.rtsp.RtspOnlyAudio
 import com.pedro.rtsp.rtsp.Protocol
-import kotlin.math.min
 
 class MicPublisherService : Service() {
     companion object {
         private const val CHANNEL_ID = "roverd-mic"
         private const val NOTIFICATION_ID = 3
-        private const val RESTART_BASE_MS = 2_000L
-        private const val RESTART_MAX_MS = 30_000L
+        private const val RESTART_MS = 2_000L
 
         const val ACTION_START = "mic_start"
         const val ACTION_RESTART = "mic_restart"
@@ -274,13 +272,13 @@ class MicPublisherService : Service() {
     private fun scheduleRestart(reason: String, generation: Long) {
         if (generation != activeGeneration) return
         if (manualStop || destroying || !RoverSettings.load(this).micEnabled || pendingRestart != null) return
-        val attempt = restartAttempt++
-        val delay = min(RESTART_BASE_MS * (1L shl attempt.coerceAtMost(4)), RESTART_MAX_MS)
+        val attempt = ++restartAttempt
+        val delay = RESTART_MS
         MicRuntimeState.reconnects += 1
         MicRuntimeState.connected = false
         MicRuntimeState.state = "Restarting microphone in ${delay}ms"
         MicRuntimeState.lastError = reason
-        RoverRuntimeState.log("MIC full pipeline restart scheduled generation=$generation in ${delay}ms attempt=${attempt + 1}: $reason")
+        RoverRuntimeState.log("MIC full pipeline restart scheduled generation=$generation in ${delay}ms attempt=$attempt fixed-delay: $reason")
         updateNotification("Mic recovering in ${delay / 1000}s")
         val task = Runnable {
             pendingRestart = null
