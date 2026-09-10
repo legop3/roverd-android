@@ -1,9 +1,10 @@
 package land.otter.roverd
 
-import android.app.admin.DevicePolicyManager
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
@@ -21,6 +22,7 @@ class WifiRecoveryWatchdog(
         private const val WIFI_OFF_MS = 2_000L
         private const val RECOVERY_COOLDOWN_MS = 5 * 60_000L
         private const val WIFI_ENABLE_RETRY_MS = 2_000L
+        private const val NETWORK_REQUEST_RELEASE_MS = 30_000L
         private const val MAX_PENDING_ALERTS = 10
     }
 
@@ -28,13 +30,11 @@ class WifiRecoveryWatchdog(
     private val handler = Handler(Looper.getMainLooper())
     private val wifi = appContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     private val connectivity = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-    private val devicePolicy = appContext.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
 
     private var running = false
     private var unvalidatedSinceMs = 0L
     private var lastRecoveryAtMs = 0L
     private var recoveryInProgress = false
-    private var unavailableReported = false
     private val pendingAlerts = mutableListOf<Pair<String, Map<String, Any>>>()
 
     private val checkTask = object : Runnable {
@@ -56,7 +56,6 @@ class WifiRecoveryWatchdog(
         handler.removeCallbacksAndMessages(null)
         unvalidatedSinceMs = 0L
         recoveryInProgress = false
-        unavailableReported = false
         pendingAlerts.clear()
     }
 
@@ -68,12 +67,11 @@ class WifiRecoveryWatchdog(
     }
 
     private fun checkNow() {
-        if (Build.VERSION.SDK_INT < 23) return
-        if (recoveryInProgress) return
+        if (Build.VERSION.SDK_INT < 23 || recoveryInProgress) return
 
-        if (!isWifiAssociatedButUnvalidated()) {
+        val badWifi = findAssociatedUnvalidatedWifi()
+        if (badWifi == null) {
             unvalidatedSinceMs = 0L
-            unavailableReported = false
             return
         }
 
@@ -88,66 +86,83 @@ class WifiRecoveryWatchdog(
         if (badForMs < UNVALIDATED_TIMEOUT_MS) return
         if (lastRecoveryAtMs != 0L && now - lastRecoveryAtMs < RECOVERY_COOLDOWN_MS) return
 
-        if (!canControlWifi()) {
-            if (!unavailableReported) {
-                unavailableReported = true
-                RoverRuntimeState.log(
-                    "WIFI watchdog: recovery needed after ${badForMs}ms but Roverd is not device owner/profile owner",
-                )
-                sendOrQueueAlert(
-                    "phoneWifi.recovery unavailable: Roverd is not device owner",
-                    mapOf(
-                        "unvalidatedMs" to badForMs,
-                        "action" to "wifiRadioCycle",
-                        "deviceOwner" to false,
-                    ),
-                )
-            }
-            return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            cycleWifi(badForMs)
+        } else {
+            requestFrameworkRecovery(badWifi, badForMs)
         }
-
-        cycleWifi(badForMs)
     }
 
-    private fun isWifiAssociatedButUnvalidated(): Boolean {
-        if (!wifi.isWifiEnabled) return false
-        if (Build.VERSION.SDK_INT < 23) return false
+    private fun findAssociatedUnvalidatedWifi(): Network? {
+        if (!wifi.isWifiEnabled || Build.VERSION.SDK_INT < 23) return null
 
-        var sawInternetWifi = false
+        var candidate: Network? = null
         for (network in connectivity.allNetworks) {
             val caps = connectivity.getNetworkCapabilities(network) ?: continue
             if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
             if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
-            sawInternetWifi = true
-            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
-                return false
-            }
+            if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return null
+            candidate = network
         }
-        return sawInternetWifi
+        return candidate
     }
 
-    private fun canControlWifi(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
-        return devicePolicy.isDeviceOwnerApp(appContext.packageName) ||
-            devicePolicy.isProfileOwnerApp(appContext.packageName)
+    private fun requestFrameworkRecovery(network: Network, badForMs: Long) {
+        lastRecoveryAtMs = SystemClock.elapsedRealtime()
+        unvalidatedSinceMs = 0L
+
+        RoverRuntimeState.log(
+            "WIFI watchdog: asking Android to re-evaluate broken Wi-Fi after ${badForMs}ms without validated Internet",
+        )
+
+        runCatching {
+            connectivity.reportNetworkConnectivity(network, false)
+        }.onFailure {
+            RoverRuntimeState.log("WIFI watchdog: reportNetworkConnectivity failed: ${it.stackTraceToString()}")
+        }
+
+        // A normal Android 10+ app cannot toggle/disconnect/reassociate Wi-Fi. Requesting an
+        // Internet-capable Wi-Fi network gives ConnectivityService another reason to reevaluate
+        // and select/reconnect Wi-Fi without needing device-owner, root, or user interaction.
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        val callback = object : ConnectivityManager.NetworkCallback() {}
+        runCatching {
+            connectivity.requestNetwork(request, callback)
+            handler.postDelayed({
+                runCatching { connectivity.unregisterNetworkCallback(callback) }
+            }, NETWORK_REQUEST_RELEASE_MS)
+        }.onFailure {
+            RoverRuntimeState.log("WIFI watchdog: Wi-Fi network request failed: ${it.stackTraceToString()}")
+        }
+
+        sendOrQueueAlert(
+            "phoneWifi.recovery requested Android network re-evaluation after ${badForMs / 1000}s without Internet",
+            mapOf(
+                "unvalidatedMs" to badForMs,
+                "action" to "networkReevaluation",
+                "radioCycleAvailable" to false,
+            ),
+        )
     }
 
     @Suppress("DEPRECATION")
     private fun cycleWifi(badForMs: Long) {
-        val now = SystemClock.elapsedRealtime()
-        lastRecoveryAtMs = now
+        lastRecoveryAtMs = SystemClock.elapsedRealtime()
         unvalidatedSinceMs = 0L
         recoveryInProgress = true
-        unavailableReported = false
 
-        val event = "phoneWifi.recovery cycling Wi-Fi after ${badForMs / 1000}s without Internet"
-        val data = mapOf<String, Any>(
-            "unvalidatedMs" to badForMs,
-            "action" to "wifiRadioCycle",
-            "offMs" to WIFI_OFF_MS,
-            "deviceOwner" to devicePolicy.isDeviceOwnerApp(appContext.packageName),
+        sendOrQueueAlert(
+            "phoneWifi.recovery cycling Wi-Fi after ${badForMs / 1000}s without Internet",
+            mapOf(
+                "unvalidatedMs" to badForMs,
+                "action" to "wifiRadioCycle",
+                "offMs" to WIFI_OFF_MS,
+                "radioCycleAvailable" to true,
+            ),
         )
-        sendOrQueueAlert(event, data)
         RoverRuntimeState.log("WIFI watchdog: cycling Wi-Fi after ${badForMs}ms without validated Internet")
 
         val disabled = runCatching { wifi.setWifiEnabled(false) }
