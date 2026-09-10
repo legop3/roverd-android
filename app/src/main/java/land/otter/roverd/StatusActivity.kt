@@ -87,8 +87,8 @@ class StatusActivity : Activity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        // Leave the dashboard underneath the config activity so Back from config returns here.
         startActivity(Intent(this, MainActivity::class.java))
-        finish()
     }
 
     private fun buildDashboard(): View {
