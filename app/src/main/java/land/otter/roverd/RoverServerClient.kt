@@ -16,7 +16,6 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.min
 
 class RoverServerClient(
     context: Context,
@@ -30,6 +29,7 @@ class RoverServerClient(
         private const val DISCONNECT_SEEK_SECONDS = 60L
         private const val DISCONNECT_RECOVER_SECONDS = 360L
         private const val HOST_STATS_INTERVAL_SECONDS = 1L
+        private const val RECONNECT_SECONDS = 2L
     }
 
     private val appContext = context.applicationContext
@@ -43,7 +43,6 @@ class RoverServerClient(
     private val closed = AtomicBoolean(false)
     @Volatile private var socket: WebSocket? = null
     @Volatile private var connected = false
-    private var reconnectSeconds = 1L
     private var lastSensorSentNs = 0L
     private var hostStatsTask: ScheduledFuture<*>? = null
     private var disconnectSeekTask: ScheduledFuture<*>? = null
@@ -417,9 +416,8 @@ class RoverServerClient(
 
     private fun scheduleReconnect() {
         if (closed.get()) return
-        val delay = reconnectSeconds
-        reconnectSeconds = min(30L, reconnectSeconds * 2L)
-        RoverRuntimeState.log("WS reconnect scheduled in ${delay}s")
+        val delay = RECONNECT_SECONDS
+        RoverRuntimeState.log("WS reconnect scheduled in ${delay}s fixed-delay")
         scheduler.schedule({ connect() }, delay, TimeUnit.SECONDS)
     }
 
@@ -477,7 +475,6 @@ class RoverServerClient(
         override fun onOpen(webSocket: WebSocket, response: Response) {
             socket = webSocket
             connected = true
-            reconnectSeconds = 1
             cancelDisconnectFailsafes()
             RoverRuntimeState.setServerState(true)
             onStatus("Server connected")
